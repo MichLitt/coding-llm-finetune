@@ -1,0 +1,52 @@
+# DPO training configuration for Colab A100 40GB
+# Run: python scripts/dpo_train.py --config configs/dpo_config.yaml --sft-checkpoint <path>
+
+model:
+  max_seq_length: 2048
+  dtype: "bfloat16"
+
+lora:
+  r: 32                             # Smaller rank for DPO to avoid overfitting
+  lora_alpha: 64
+  lora_dropout: 0.05
+  bias: "none"
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+  use_gradient_checkpointing: "unsloth"
+  random_state: 42
+
+dpo:
+  beta: 0.1                         # KL penalty; increase to 0.3 if degradation occurs
+  loss_type: "sigmoid"              # standard DPO loss
+  max_prompt_length: 512
+  max_length: 1536
+
+training:
+  per_device_train_batch_size: 1    # DPO processes chosen+rejected, double memory
+  gradient_accumulation_steps: 16   # effective batch = 16
+  num_train_epochs: 1               # DPO rarely needs more than 1-2 epochs
+  learning_rate: 5.0e-5             # 4× smaller than SFT
+  lr_scheduler_type: "cosine"
+  warmup_ratio: 0.1
+  bf16: true
+  tf32: true
+  optim: "adamw_8bit"
+  seed: 42
+
+checkpointing:
+  output_dir: "results/dpo_checkpoints"
+  logging_steps: 5
+  eval_steps: 20
+  save_steps: 50
+  save_total_limit: 2
+  report_to: "wandb"
+
+data:
+  train_file: "data/processed/dpo_pairs.jsonl"
+  val_file:   "data/processed/dpo_pairs_val.jsonl"

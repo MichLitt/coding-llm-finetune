@@ -1,0 +1,13 @@
+{
+  "exp_id": "sft_C_with_targeted",
+  "model_name": "unsloth/Qwen3.5-9B",
+  "lora_r": 64,
+  "num_epochs": 1,
+  "data_sources": [
+    "magicoder",
+    "evol",
+    "targeted"
+  ],
+  "train_samples": 81891,
+  "val_samples": 4312
+}

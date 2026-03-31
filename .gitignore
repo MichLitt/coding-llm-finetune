@@ -1,0 +1,40 @@
+# Virtual environment
+.venv/
+
+# Environment variables
+.env
+
+# Data (raw + processed large files)
+data/raw/
+data/processed/
+data/stats/
+
+# Model checkpoints (large binary files — upload to HF Hub instead)
+results/sft_checkpoints/
+results/dpo_checkpoints/
+checkpoints/*/adapter_model.safetensors
+checkpoints/*/.cache/
+
+# Unsloth compiled kernel cache
+unsloth_compiled_cache/
+notebooks/unsloth_compiled_cache/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code settings (local IDE config)
+.claude/
+CLAUDE.md
+
+# WandB
+wandb/
