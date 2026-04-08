@@ -1,7 +1,7 @@
-"""Local pipeline validation using Qwen2.5-Coder-0.5B (4-bit quantized).
+"""Local pipeline validation using Qwen3.5-4B-Instruct (4-bit quantized).
 
 Checks that the full SFT training loop works without errors before
-committing Colab GPU time to the 7B model.
+running full-scale training on the complete dataset.
 
 Requirements (install separately — not in base uv env):
     pip install unsloth[colab-new] trl peft accelerate bitsandbytes
@@ -23,14 +23,14 @@ import click
 ROOT = Path(__file__).parent.parent
 
 VALIDATION_CONFIG = {
-    "model_name": "Qwen/Qwen2.5-Coder-0.5B-Instruct",
+    "model_name": "unsloth/Qwen3.5-4B-Instruct",
     "load_in_4bit": True,
     "max_seq_length": 1024,
     "lora_r": 8,
     "lora_alpha": 16,
     "lora_dropout": 0.05,
     "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
-    "per_device_train_batch_size": 2,
+    "per_device_train_batch_size": 1,
     "gradient_accumulation_steps": 4,
     "num_train_epochs": 1,
     "learning_rate": 2e-4,
@@ -75,6 +75,7 @@ def main(data_dir: str, num_samples: int, num_val_samples: int):
 
     try:
         from unsloth import FastLanguageModel
+        from unsloth.chat_templates import train_on_responses_only
         from trl import SFTTrainer, SFTConfig
         from datasets import Dataset
     except ImportError:
@@ -84,9 +85,7 @@ def main(data_dir: str, num_samples: int, num_val_samples: int):
 
     data_path = ROOT / data_dir
     all_train = _load_samples(data_path, num_samples)
-    all_val   = _load_samples(data_path / ".." / data_dir, num_val_samples)
 
-    # Use val file for actual val
     val_path = data_path / "sft_val.jsonl"
     if val_path.exists():
         val_samples = [
@@ -98,7 +97,7 @@ def main(data_dir: str, num_samples: int, num_val_samples: int):
         all_train   = all_train[num_val_samples:]
 
     print(f"\n{'='*60}")
-    print("Pipeline Validation — Qwen2.5-Coder-0.5B (4-bit)")
+    print("Pipeline Validation — Qwen3.5-4B-Instruct (4-bit)")
     print(f"{'='*60}")
     print(f"Train samples : {len(all_train)}")
     print(f"Val   samples : {len(val_samples)}")
@@ -197,6 +196,13 @@ def main(data_dir: str, num_samples: int, num_val_samples: int):
             ),
         )
 
+        # Only compute loss on assistant response tokens
+        trainer = train_on_responses_only(
+            trainer,
+            instruction_part="<|im_start|>user\n",
+            response_part="<|im_start|>assistant\n",
+        )
+
         train_result = trainer.train()
         train_loss = train_result.training_loss
         ok_forward  = not math.isnan(train_loss) and not math.isinf(train_loss)
@@ -258,19 +264,13 @@ def main(data_dir: str, num_samples: int, num_val_samples: int):
     if torch.cuda.is_available():
         used_gb  = torch.cuda.max_memory_allocated() / 1e9
         total_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
-        print(f"\nVRAM usage: {used_gb:.2f} GB / {total_gb:.2f} GB")
-        projected_7b = used_gb * 14  # rough scale factor 0.5B → 7B
-        print(f"Projected for 7B bf16 LoRA (~14× scale): {projected_7b:.1f} GB")
-        if projected_7b <= 40:
-            print("  → A100 40GB should be sufficient ✓")
-        else:
-            print("  → WARNING: may be tight on A100 40GB, consider reducing batch size")
+        print(f"\nPeak VRAM: {used_gb:.2f} GB / {total_gb:.2f} GB")
 
     # ---- Summary ----
     print(f"\n{'='*60}")
     print(f"Result: {checks_passed}/{total_checks} checks passed")
     if checks_passed == total_checks:
-        print("ALL CHECKS PASSED — ready to run on Colab A100")
+        print("ALL CHECKS PASSED — ready to run full training")
     else:
         print(f"FAILED {total_checks - checks_passed} checks — fix issues before training")
     print(f"{'='*60}\n")

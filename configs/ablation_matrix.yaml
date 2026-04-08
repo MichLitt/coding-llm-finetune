@@ -1,38 +1,31 @@
-# Ablation experiment matrix
-# Usage: python scripts/sft_train.py --exp-id <key> [overrides from this file]
+# Ablation experiment matrix for v3
+# Usage: python scripts/sft_train.py --exp-id <key>
 
 experiments:
-  # Experiment A: baseline — only high-quality Magicoder data
-  sft_A_magicoder_only:
-    description: "Baseline: Magicoder-OSS-Instruct only"
-    data_sources: [magicoder]
-    lora_r: 64
-    num_train_epochs: 1
-
-  # Experiment B: add Evol-CodeAlpaca for broader coverage
-  sft_B_full_data:
-    description: "Extended: Magicoder + EvolCodeAlpaca"
+  # Core experiment: generic data only (ablation baseline)
+  sft_generic:
+    description: "Generic only: Magicoder + EvolCodeAlpaca"
     data_sources: [magicoder, evol]
-    lora_r: 64
-    num_train_epochs: 1
+    lora_r: 32
+    num_train_epochs: 3
 
-  # Experiment C: full data + targeted failure data (primary result)
-  sft_C_with_targeted:
-    description: "Full + Targeted (primary): adds Coder-Agent failure patterns"
-    data_sources: [magicoder, evol, targeted]
-    lora_r: 64
-    num_train_epochs: 1
-
-  # Ablation: lower LoRA rank (compare vs C)
-  sft_D_rank32:
-    description: "Rank ablation: r=32 vs r=64"
+  # Primary experiment: generic + targeted failure patterns
+  sft_targeted:
+    description: "Generic + Targeted (primary): adds Coder-Agent failure patterns"
     data_sources: [magicoder, evol, targeted]
     lora_r: 32
-    num_train_epochs: 1
+    num_train_epochs: 3
 
-  # Ablation: fewer epochs (check overfitting)
-  sft_E_epoch1:
-    description: "Epoch ablation: 1 epoch"
+  # Ablation: lower LoRA rank
+  sft_targeted_r16:
+    description: "Rank ablation: r=16 vs r=32"
     data_sources: [magicoder, evol, targeted]
-    lora_r: 64
-    num_train_epochs: 1
+    lora_r: 16
+    num_train_epochs: 3
+
+  # Ablation: fewer epochs (check overfitting on small dataset)
+  sft_targeted_ep2:
+    description: "Epoch ablation: 2 epochs vs 3"
+    data_sources: [magicoder, evol, targeted]
+    lora_r: 32
+    num_train_epochs: 2

@@ -3,6 +3,12 @@
 Uses MiniMax API (OpenAI-compatible) to generate Python coding problems
 and correct solutions for the 8 HumanEval tasks where the agent failed.
 
+NOTE: Targeted data is conceptually aligned with HumanEval failure patterns
+(same error concepts, different function names/contexts). This is intentional —
+the goal is to teach the model specific error-fix patterns. It is NOT direct
+benchmark contamination (no HumanEval prompts or solutions are used), but should
+be disclosed in evaluation reports.
+
 Features:
   - Resume from partial runs (append to targeted_raw.jsonl)
   - Syntax validation via compile()
@@ -252,8 +258,8 @@ def _load_humaneval_data() -> dict:
 
 
 @click.command()
-@click.option("--target-per-pattern", default=50, show_default=True,
-              help="Target number of valid samples per failure pattern.")
+@click.option("--target-per-pattern", default=25, show_default=True,
+              help="Target number of valid samples per failure pattern (25 × 8 patterns = 200 total).")
 @click.option("--batch-size", default=8, show_default=True,
               help="Number of problems to request per API call.")
 @click.option("--model", default="MiniMax-M2.5", show_default=True,

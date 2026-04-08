@@ -1,6 +1,6 @@
 # CodeTune v2: Code Generation SFT + DPO Fine-Tuning Project Plan
 
-> **目标**：在 Qwen2.5-Coder-7B 上完成 SFT + DPO 完整 post-training pipeline，提升代码生成能力，用 HumanEval/MBPP/LiveCodeBench 量化验证效果，并与 Coder Agent 项目形成闭环。
+> **目标**：在 Qwen3.5-9B 上完成 SFT + DPO 完整 post-training pipeline，提升代码生成能力，用 HumanEval/MBPP/LiveCodeBench 量化验证效果，并与 Coder Agent 项目形成闭环。
 >
 > **硬件**：本地 RTX 5070 Laptop 8GB（数据准备 + 4bit 推理验证） + Google Colab Pro A100 80GB（训练）
 >
@@ -12,17 +12,16 @@
 
 | 维度 | 内容 |
 |------|------|
-| **Base Model（首选）** | Qwen2.5-Coder-7B-Instruct（专用 code 模型，社区成熟，LoRA 经验丰富） |
-| **Base Model（备选）** | Qwen3.5-9B（更新更强，但兼容性风险略高；遇到问题退回首选） |
+| **Base Model（选用）** | Qwen3.5-9B（更新更强，最终选定） |
 | **训练方式** | Phase 1: SFT（bf16 LoRA）→ Phase 2: DPO（简洁偏好信号） |
 | **训练框架** | Unsloth + TRL（SFTTrainer / DPOTrainer） |
 | **评估基准** | HumanEval, HumanEval+, MBPP, LiveCodeBench, 自定义 targeted subset |
 | **预估周期** | 14 天 |
 | **预估成本** | Colab Pro 学生版（已有），基本零额外成本 |
 
-### 为什么选 Qwen2.5-Coder-7B 而不是 Qwen3.5-9B
+### 为什么选 Qwen3.5-9B
 
-| 维度 | Qwen2.5-Coder-7B | Qwen3.5-9B |
+| 维度 | Qwen2.5-Coder-7B（初始考虑） | Qwen3.5-9B（最终选用） |
 |------|-------------------|-------------|
 | **代码专精度** | 专门为代码优化，base HumanEval 更高 | 通用模型，代码不是主要优化方向 |
 | **社区成熟度** | 大量 fine-tuning 教程和经验 | 发布仅一周，踩坑经验少 |
@@ -31,7 +30,7 @@
 | **显存需求** | bf16 LoRA ~18GB，A100 轻松 | bf16 LoRA ~22GB，A100 可以但余量更小 |
 | **面试叙事** | "我选了专用 code 模型，因为..." 体现技术判断力 | "我选了最新模型" 但面试官可能追问为什么不用专用模型 |
 
-> **策略**：默认用 Qwen2.5-Coder-7B 推进。如果 Day 4 pipeline 验证阶段一切顺利且有余力，可以同时跑一组 Qwen3.5-9B 作为额外对比实验。
+> **决策**：最终选用 Qwen3.5-9B，使用更新更强的通用模型验证 pipeline 在非专用 code 模型上的提升空间。
 
 ---
 
@@ -109,7 +108,7 @@ import json
 from datasets import load_dataset
 from transformers import AutoTokenizer
 
-tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-Coder-7B-Instruct")
+tokenizer = AutoTokenizer.from_pretrained("unsloth/Qwen3.5-9B")
 
 def clean_sample(sample):
     instruction = sample["instruction"]
@@ -329,7 +328,7 @@ import torch
 
 # ============ 模型加载 ============
 model, tokenizer = FastLanguageModel.from_pretrained(
-    model_name="Qwen/Qwen2.5-Coder-7B-Instruct",
+    model_name="unsloth/Qwen3.5-9B",
     max_seq_length=2048,
     load_in_4bit=False,       # A100 80GB，用 bf16 LoRA，质量更好
     dtype=torch.bfloat16,
@@ -706,7 +705,7 @@ tokenizer.save_pretrained("outputs/dpo/final")
 
 | 模型 | 描述 |
 |------|------|
-| **Model A** | Qwen2.5-Coder-7B-Instruct（原始 base model） |
+| **Model A** | Qwen3.5-9B（原始 base model） |
 | **Model B** | + SFT（generic data only） |
 | **Model C** | + SFT（generic + targeted data） |
 | **Model D** | + SFT + DPO（完整 pipeline） |
@@ -759,7 +758,7 @@ def evaluate_model(model_path, output_file, n_samples=1):
 
 # 评估所有模型
 models = {
-    "base":         "Qwen/Qwen2.5-Coder-7B-Instruct",
+    "base":         "unsloth/Qwen3.5-9B",
     "sft_generic":  "outputs/sft_generic/final",
     "sft_targeted": "outputs/sft/final",
     "sft_dpo":      "outputs/dpo/final",
@@ -868,7 +867,7 @@ def failure_analysis(base_results, sft_results, dpo_results):
 # CodeTune: Targeted Post-Training for Code Generation
 
 ## TL;DR
-Fine-tuned Qwen2.5-Coder-7B with SFT + DPO, using failure-pattern-driven
+Fine-tuned Qwen3.5-9B with SFT + DPO, using failure-pattern-driven
 training data derived from a coding agent's error analysis. Achieved X% pass@1
 on HumanEval (↑Y%) and Z% on LiveCodeBench (↑W%), with particularly strong
 improvements on edge-case handling (+V%).
@@ -928,7 +927,7 @@ print(f"Fine-tuned agent pass rate: {ft_agent_results['pass_rate']:.1%}")
 | **Day 2** | 数据准备 | 通用数据清洗、过滤、去重 | 本地 | ~2,500 条通用数据 |
 | **Day 3** | 数据准备 | 构造 targeted data + 数据报告 | 本地 | ~500-1,000 条 targeted 数据 |
 | **Day 4** | SFT 验证 | 用 0.5B 模型本地验证 pipeline | 本地 | 确认 pipeline 无 bug |
-| **Day 5** | SFT 训练 | 7B 模型正式 SFT 训练 | Colab A100 | SFT checkpoint |
+| **Day 5** | SFT 训练 | 9B 模型正式 SFT 训练 | Colab A100 | SFT checkpoint |
 | **Day 6** | SFT 训练 | 继续训练 + 初步评估 | Colab A100 | SFT 最终模型 |
 | **Day 7** | SFT Ablation | generic vs targeted + rank 对比 | Colab A100 | ablation 结果 |
 | **Day 8** | DPO 数据 | 用 SFT 模型生成候选，构造 pairs | Colab A100 | ~1,000-1,500 pairs |
@@ -966,7 +965,7 @@ Coder Agent（inference-time）              CodeTune（training-time）
 
 **面试叙事模板**：
 
-> "在做 Coder Agent 项目的过程中，我发现 base model 在 off-by-one errors 和 edge case handling 上反复犯错。于是在 CodeTune 项目中，我针对这些 failure patterns 构造了 targeted training data，在 Qwen2.5-Coder-7B 上做了 SFT + DPO。结果显示，targeted SFT 相比 generic-only SFT 在 edge case 类任务上 pass rate 提升了 X%，加上 DPO 后在 HumanEval+ 上 pass@1 从 A% 提升到 B%。最后我把 fine-tuned model 接回 Coder Agent，验证 agent 的整体任务完成率从 C% 提升到 D%。"
+> "在做 Coder Agent 项目的过程中，我发现 base model 在 off-by-one errors 和 edge case handling 上反复犯错。于是在 CodeTune 项目中，我针对这些 failure patterns 构造了 targeted training data，在 Qwen3.5-9B 上做了 SFT + DPO。结果显示，targeted SFT 相比 generic-only SFT 在 edge case 类任务上 pass rate 提升了 X%，加上 DPO 后在 HumanEval+ 上 pass@1 从 A% 提升到 B%。最后我把 fine-tuned model 接回 Coder Agent，验证 agent 的整体任务完成率从 C% 提升到 D%。"
 
 ---
 
@@ -974,8 +973,8 @@ Coder Agent（inference-time）              CodeTune（training-time）
 
 ### 模型与数据
 
-**Q: 为什么选 Qwen2.5-Coder-7B 而不是 CodeLlama 或 DeepSeek-Coder？**
-> Qwen2.5-Coder-7B 在同量级 code model 中 benchmark 表现领先，Apache 2.0 开源，社区 LoRA fine-tuning 支持成熟。CodeLlama 相对较老，DeepSeek-Coder-V2 是 MoE 架构，QLoRA 支持不如 dense model 稳定。
+**Q: 为什么选 Qwen3.5-9B 而不是 CodeLlama 或 DeepSeek-Coder？**
+> Qwen3.5-9B 是最新一代 Qwen 通用模型，综合能力强，Apache 2.0 开源，Unsloth 支持成熟。CodeLlama 相对较老，DeepSeek-Coder-V2 是 MoE 架构，QLoRA 支持不如 dense model 稳定。选用 9B 通用模型也有助于验证 pipeline 在非专用 code 模型上的提升空间。
 
 **Q: 为什么不做 full fine-tuning？**
 > 9B 模型 full FT 需要 ~72GB VRAM（bf16），A100 80GB 也装不下。LoRA 只训练 ~0.5-1% 的参数，效果接近 full FT，而且 adapter 只有几十 MB，便于保存、切换和共享。
@@ -1016,7 +1015,7 @@ Coder Agent（inference-time）              CodeTune（training-time）
 
 > **CodeTune — Code Generation Post-Training Pipeline**
 >
-> - Built end-to-end SFT + DPO pipeline on Qwen2.5-Coder-7B with bf16 LoRA; improved LiveCodeBench pass@1 from X% to Y% (+Z%) using failure-pattern-driven training data derived from coding agent error analysis.
+> - Built end-to-end SFT + DPO pipeline on Qwen3.5-9B with bf16 LoRA; improved LiveCodeBench pass@1 from X% to Y% (+Z%) using failure-pattern-driven training data derived from coding agent error analysis.
 >
 > - Designed automated DPO preference pair construction via unit test execution; conducted ablation showing targeted training data improved edge-case pass rate by W% over generic-only SFT baseline.
 
@@ -1026,12 +1025,12 @@ Coder Agent（inference-time）              CodeTune（training-time）
 
 | 风险 | 概率 | 影响 | 应对 |
 |------|------|------|------|
-| Qwen2.5-Coder-7B LoRA 训练报错 | 低 | 高 | 社区成熟，大量已验证案例；如遇问题查 Unsloth GitHub issues |
+| Qwen3.5-9B LoRA 训练报错 | 低 | 高 | 社区成熟，大量已验证案例；如遇问题查 Unsloth GitHub issues |
 | SFT 后 HumanEval 无提升 | 中 | 中 | base model 已经很强；转而突出 targeted subset 提升 |
 | DPO 导致模型退化 | 中 | 中 | 增大 beta、减少训练步数、检查 pair 质量 |
 | Colab 断连 | 高 | 低 | 每 50 steps 保存 checkpoint，脚本支持 resume from checkpoint |
 | DPO 有效 pair 数不够 | 中 | 中 | 降低 temperature 增加多样性、增加采样次数、补充更多 prompt |
-| 本地 8GB 跑不动 7B 推理 | 低 | 中 | 4-bit GGUF 量化约 4-5GB，8GB 够用；或回 Colab 跑评估 |
+| 本地 8GB 跑不动 9B 推理 | 低 | 中 | 4-bit GGUF 量化约 5-6GB，8GB 够用；或回 Colab 跑评估 |
 | 时间不够完成全部 | 中 | 中 | 优先级：SFT > 评估 > DPO > ablation > 工程化 |
 
 ### 优先级排序（如果时间不够）

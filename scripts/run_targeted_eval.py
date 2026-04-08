@@ -5,7 +5,7 @@ Coder Agent previously failed, and prints a per-task comparison table.
 
 Usage:
     uv run python scripts/run_targeted_eval.py \
-        --models "base=unsloth/Qwen3.5-9B,sft=results/sft_checkpoints/sft_C_with_targeted/final,dpo=results/dpo_checkpoints/dpo_v1/final"
+        --models "base=unsloth/Qwen3.5-4B-Instruct,sft=results/sft_checkpoints/sft_targeted/final,dpo=results/dpo_checkpoints/dpo_v1/final"
 
     # Or compare previously computed eval results (no model loading):
     uv run python scripts/run_targeted_eval.py --from-results
@@ -118,7 +118,7 @@ def _load_from_results(label: str) -> dict[str, bool] | None:
               help="Comma-separated label=model_path pairs, e.g. 'base=Qwen/...,sft=results/...'")
 @click.option("--from-results", is_flag=True,
               help="Load results from previously saved humaneval_*.json files instead of running models.")
-@click.option("--result-labels", default="base,sft_C,dpo_v1", show_default=True,
+@click.option("--result-labels", default="base,sft_generic,sft_targeted,dpo_v1", show_default=True,
               help="Labels to load when using --from-results.")
 def main(models: str | None, from_results: bool, result_labels: str):
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)

@@ -1,11 +1,11 @@
-"""SFT training script — run on Colab A100 40GB.
+"""SFT training script — runs locally on RTX 5070 (4-bit) or Colab A100 (bf16).
 
-Loads Qwen2.5-Coder-7B-Instruct via Unsloth, attaches LoRA, trains
+Loads Qwen3.5-4B-Instruct via Unsloth, attaches LoRA, trains
 with TRL SFTTrainer, and saves the adapter.
 
-Usage (Colab):
-    python scripts/sft_train.py --exp-id sft_C_with_targeted
-    python scripts/sft_train.py --exp-id sft_A_magicoder_only --data-sources magicoder
+Usage:
+    python scripts/sft_train.py --exp-id sft_targeted
+    python scripts/sft_train.py --exp-id sft_generic --data-sources magicoder,evol
 
 The --exp-id argument selects defaults from configs/ablation_matrix.yaml;
 individual flags override those defaults.
@@ -75,6 +75,7 @@ def main(exp_id: str, data_sources: str | None, lora_r: int | None, epochs: int 
     try:
         import torch
         from unsloth import FastLanguageModel
+        from unsloth.chat_templates import train_on_responses_only
         from trl import SFTTrainer, SFTConfig
         from datasets import Dataset
     except ImportError as e:
@@ -191,6 +192,13 @@ def main(exp_id: str, data_sources: str | None, lora_r: int | None, epochs: int 
             max_seq_length=max_seq_len,
             run_name=exp_id,
         ),
+    )
+
+    # Only compute loss on assistant response tokens (not prompt/system)
+    trainer = train_on_responses_only(
+        trainer,
+        instruction_part="<|im_start|>user\n",
+        response_part="<|im_start|>assistant\n",
     )
 
     # Eval before training (baseline reference)

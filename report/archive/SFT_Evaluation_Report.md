@@ -1,7 +1,7 @@
 # CodeTune v2 — SFT 阶段性评估报告
 
 **日期**: 2026-03-17
-**模型基座**: Qwen2.5-Coder-7B-Instruct
+**模型基座**: Qwen3.5-9B
 **评估基准**: HumanEval (164题)
 
 ---

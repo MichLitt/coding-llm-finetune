@@ -182,24 +182,6 @@ def _iter_evol(tokenizer, min_p: int, max_p: int, min_r: int, max_r: int) -> Ite
         yield to_messages(instruction, output, source="evol")
 
 
-def _iter_humaneval() -> Iterator[dict]:
-    """Yield HumanEval samples as SFT data (kept small, used for targeted eval reference)."""
-    ds = load_dataset("openai/openai_humaneval", split="test", trust_remote_code=True)
-    for row in tqdm(ds, desc="HumanEval", unit="row"):
-        task_id = row["task_id"]
-        prompt = row["prompt"].strip()
-        canonical = row["canonical_solution"].strip()
-        if not prompt or not canonical:
-            continue
-        # Wrap canonical solution in full function form
-        output = prompt + canonical
-        yield to_messages(
-            instruction=f"Complete the following Python function:\n\n{prompt}",
-            output=output,
-            source="humaneval",
-            task_id=task_id,
-        )
-
 
 # ---- deduplication -----------------------------------------------------------
 
@@ -207,9 +189,9 @@ def deduplicate(samples: list[dict], threshold: float = 0.85, num_perm: int = 12
     """MinHash LSH deduplication on instruction text."""
     lsh = MinHashLSH(threshold=threshold, num_perm=num_perm)
     unique: list[dict] = []
-    # HumanEval and targeted samples are never deduplicated
-    priority = [s for s in samples if s["source"] in ("humaneval", "targeted")]
-    general  = [s for s in samples if s["source"] not in ("humaneval", "targeted")]
+    # Targeted samples are never deduplicated (small, curated set)
+    priority = [s for s in samples if s["source"] == "targeted"]
+    general  = [s for s in samples if s["source"] != "targeted"]
 
     # Insert priority samples first (no dedup among them)
     for i, s in enumerate(priority):
@@ -243,7 +225,7 @@ def deduplicate(samples: list[dict], threshold: float = 0.85, num_perm: int = 12
               help="Cap total samples (0 = no cap, for quick testing use e.g. 500).")
 @click.option("--val-ratio", default=0.05, show_default=True,
               help="Fraction of data held out as validation set.")
-@click.option("--sources", default="magicoder,evol,humaneval",
+@click.option("--sources", default="magicoder,evol",
               show_default=True, help="Comma-separated list of data sources to include.")
 @click.option("--seed", default=42, show_default=True)
 def main(output_dir: str, max_samples: int, val_ratio: float, sources: str, seed: int):
@@ -271,9 +253,6 @@ def main(output_dir: str, max_samples: int, val_ratio: float, sources: str, seed
     if "evol" in source_list:
         all_samples.extend(_iter_evol(tokenizer, MIN_P, MAX_P, MIN_R, MAX_R))
 
-    if "humaneval" in source_list:
-        all_samples.extend(_iter_humaneval())
-
     # Load targeted data if present
     targeted_path = ROOT / "data/processed/targeted/targeted_filtered.jsonl"
     if targeted_path.exists():
@@ -292,9 +271,9 @@ def main(output_dir: str, max_samples: int, val_ratio: float, sources: str, seed
 
     # Optional cap
     if max_samples and len(all_samples) > max_samples:
-        # Always keep priority samples
-        priority = [s for s in all_samples if s["source"] in ("humaneval", "targeted")]
-        general  = [s for s in all_samples if s["source"] not in ("humaneval", "targeted")]
+        # Always keep targeted samples
+        priority = [s for s in all_samples if s["source"] == "targeted"]
+        general  = [s for s in all_samples if s["source"] != "targeted"]
         random.shuffle(general)
         cap_general = max(0, max_samples - len(priority))
         all_samples = priority + general[:cap_general]

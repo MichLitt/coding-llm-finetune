@@ -1,10 +1,10 @@
-"""DPO training script — run on Colab A100 40GB.
+"""DPO training script — run locally on RTX 5070 or Colab A100.
 
 Loads the best SFT checkpoint, adds a new LoRA adapter,
 and trains with TRL DPOTrainer using binary preference pairs.
 
-Usage (Colab):
-    python scripts/dpo_train.py --sft-checkpoint results/sft_checkpoints/sft_C_with_targeted/final
+Usage:
+    python scripts/dpo_train.py --sft-checkpoint results/sft_checkpoints/sft_targeted/final
     python scripts/dpo_train.py --sft-checkpoint <path> --beta 0.05
 """
 
@@ -22,6 +22,7 @@ load_dotenv()
 
 ROOT = Path(__file__).parent.parent
 DPO_CFG_PATH = ROOT / "configs/dpo_config.yaml"
+BASE_MODEL = "unsloth/Qwen3.5-4B-Instruct"
 
 
 def _load_yaml(path: Path) -> dict:
@@ -45,6 +46,7 @@ def main(sft_checkpoint: str, beta: float | None, exp_id: str):
         import torch
         from unsloth import FastLanguageModel, PatchDPOTrainer
         PatchDPOTrainer()  # Must patch before importing DPOTrainer
+        from peft import PeftModel
         from trl import DPOTrainer, DPOConfig
         from datasets import Dataset
     except ImportError as e:
@@ -53,12 +55,14 @@ def main(sft_checkpoint: str, beta: float | None, exp_id: str):
         sys.exit(1)
 
     cfg = _load_yaml(DPO_CFG_PATH)
+    model_cfg = cfg.get("model", {})
     dpo_cfg   = cfg.get("dpo", {})
     lora_cfg  = cfg.get("lora", {})
     train_cfg = cfg.get("training", {})
     ckpt_cfg  = cfg.get("checkpointing", {})
 
     effective_beta = beta if beta is not None else dpo_cfg.get("beta", 0.1)
+    load_in_4bit   = model_cfg.get("load_in_4bit", True)
     out_dir = ROOT / ckpt_cfg.get("output_dir", "results/dpo_checkpoints") / exp_id
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -71,6 +75,8 @@ def main(sft_checkpoint: str, beta: float | None, exp_id: str):
     print(f"DPO Training — {exp_id}")
     print(f"{'='*60}")
     print(f"SFT checkpoint : {ckpt_path}")
+    print(f"Base model     : {BASE_MODEL}")
+    print(f"load_in_4bit   : {load_in_4bit}")
     print(f"beta           : {effective_beta}")
     print(f"Output dir     : {out_dir}")
     print()
@@ -81,16 +87,29 @@ def main(sft_checkpoint: str, beta: float | None, exp_id: str):
     print(f"DPO train pairs: {len(train_raw):,}  val pairs: {len(val_raw):,}")
 
     # ---- Load SFT model ----
+    # SFT saves LoRA adapter only (no config.json). Detect and load base + adapter.
     print(f"\nLoading SFT model from {ckpt_path} …")
-    model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=str(ckpt_path),
-        max_seq_length=cfg["model"]["max_seq_length"],
-        load_in_4bit=False,           # A100: bf16 full precision
-        dtype=torch.bfloat16,
-    )
+    is_adapter_only = not (ckpt_path / "config.json").exists()
 
-    # Add fresh LoRA for DPO (smaller rank to avoid catastrophic forgetting)
-    r = lora_cfg.get("r", 32)
+    if is_adapter_only:
+        print(f"  Detected LoRA adapter — loading base {BASE_MODEL} + adapter …")
+        model, tokenizer = FastLanguageModel.from_pretrained(
+            model_name=BASE_MODEL,
+            max_seq_length=model_cfg.get("max_seq_length", 2048),
+            load_in_4bit=load_in_4bit,
+            dtype=torch.bfloat16,
+        )
+        model = PeftModel.from_pretrained(model, str(ckpt_path))
+    else:
+        model, tokenizer = FastLanguageModel.from_pretrained(
+            model_name=str(ckpt_path),
+            max_seq_length=model_cfg.get("max_seq_length", 2048),
+            load_in_4bit=load_in_4bit,
+            dtype=torch.bfloat16,
+        )
+
+    # Add fresh LoRA for DPO (smaller rank to limit drift from SFT)
+    r = lora_cfg.get("r", 16)
     model = FastLanguageModel.get_peft_model(
         model,
         r=r,
@@ -109,7 +128,6 @@ def main(sft_checkpoint: str, beta: float | None, exp_id: str):
     print(f"Trainable DPO parameters: {n_params/1e6:.2f}M")
 
     # ---- Format datasets ----
-    # DPOTrainer expects: prompt, chosen, rejected
     def _fmt(examples):
         return {
             "prompt":   examples["prompt"],
@@ -140,7 +158,6 @@ def main(sft_checkpoint: str, beta: float | None, exp_id: str):
             lr_scheduler_type=train_cfg.get("lr_scheduler_type", "cosine"),
             warmup_ratio=train_cfg.get("warmup_ratio", 0.1),
             bf16=train_cfg.get("bf16", True),
-            tf32=train_cfg.get("tf32", True),
             optim=train_cfg.get("optim", "adamw_8bit"),
             seed=train_cfg.get("seed", 42),
             logging_steps=ckpt_cfg.get("logging_steps", 5),
@@ -166,6 +183,7 @@ def main(sft_checkpoint: str, beta: float | None, exp_id: str):
     meta = {
         "exp_id": exp_id,
         "sft_checkpoint": str(sft_checkpoint),
+        "base_model": BASE_MODEL,
         "beta": effective_beta,
         "lora_r": r,
         "train_pairs": len(train_raw),
@@ -175,7 +193,6 @@ def main(sft_checkpoint: str, beta: float | None, exp_id: str):
 
     print(f"\nDPO model saved to {final_dir}")
 
-    # Quick sanity: eval on val set
     print("\nRunning final eval …")
     trainer.evaluate()
     print("Done.")

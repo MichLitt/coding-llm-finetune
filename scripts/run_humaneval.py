@@ -31,7 +31,7 @@ SYSTEM_PROMPT = (
 )
 
 
-BASE_MODEL = "unsloth/Qwen3.5-9B"
+BASE_MODEL = "unsloth/Qwen3.5-4B-Instruct"
 
 
 def _is_adapter_only(model_path: str) -> bool:

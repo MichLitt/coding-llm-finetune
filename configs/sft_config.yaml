@@ -1,15 +1,17 @@
-# SFT training configuration for Colab A100 40GB
-# Run: python scripts/sft_train.py --config configs/sft_config.yaml --exp-id <name>
+# SFT training configuration
+# Local RTX 5070 8GB: load_in_4bit=true (~5GB VRAM)
+# Colab A100 80GB:    load_in_4bit=false, bf16 LoRA (~10GB VRAM)
+# Run: python scripts/sft_train.py --exp-id <name>
 
 model:
-  name: "unsloth/Qwen3.5-9B"
+  name: "unsloth/Qwen3.5-4B-Instruct"
   max_seq_length: 2048
-  load_in_4bit: false          # A100 40GB: bf16 LoRA (~24GB, fits well)
+  load_in_4bit: true           # RTX 5070 8GB; set false on A100 for bf16
   dtype: "bfloat16"
 
 lora:
-  r: 64
-  lora_alpha: 128              # 2 × r
+  r: 32
+  lora_alpha: 64               # 2 × r
   lora_dropout: 0.05
   bias: "none"
   target_modules:
@@ -24,8 +26,8 @@ lora:
   random_state: 42
 
 training:
-  per_device_train_batch_size: 4
-  gradient_accumulation_steps: 4    # effective batch = 16
+  per_device_train_batch_size: 2
+  gradient_accumulation_steps: 8    # effective batch = 16
   num_train_epochs: 3
   learning_rate: 2.0e-4
   lr_scheduler_type: "cosine"
@@ -33,10 +35,10 @@ training:
   weight_decay: 0.01
   max_grad_norm: 1.0
   bf16: true
-  tf32: true
+  tf32: false                       # tf32 not available on all local GPUs
   optim: "adamw_8bit"
-  group_by_length: true             # reduces padding waste
-  dataloader_num_workers: 4
+  group_by_length: true
+  dataloader_num_workers: 2
   seed: 42
 
 checkpointing:
