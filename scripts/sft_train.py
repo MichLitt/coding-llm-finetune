@@ -1,6 +1,6 @@
 """SFT training script for local 8 GB or Colab A100/H100 runs.
 
-Loads a Qwen3.5-4B instruct model via Unsloth, attaches LoRA, trains with
+Loads Qwen3.5-4B via Unsloth, attaches LoRA, trains with
 TRL SFTTrainer, and saves the adapter.
 
 Usage:
@@ -106,10 +106,10 @@ def main(
 ) -> None:
     try:
         import torch
-        from datasets import Dataset
-        from trl import SFTConfig, SFTTrainer
         from unsloth import FastLanguageModel
         from unsloth.chat_templates import train_on_responses_only
+        from datasets import Dataset
+        from trl import SFTConfig, SFTTrainer
     except ImportError as e:
         print(f"ERROR: Missing dependency: {e}")
         print("Install with: pip install unsloth[colab-new] trl peft accelerate wandb bitsandbytes -q")

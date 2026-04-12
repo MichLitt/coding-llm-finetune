@@ -5,7 +5,7 @@ Coder Agent previously failed, and prints a per-task comparison table.
 
 Usage:
     uv run python scripts/run_targeted_eval.py \
-        --models "base=unsloth/Qwen3.5-4B-Instruct,sft=results/sft_checkpoints/sft_targeted/final,dpo=results/dpo_checkpoints/dpo_v1/final"
+        --models "base=unsloth/Qwen3.5-4B,sft=results/sft_checkpoints/sft_targeted/final,dpo=results/dpo_checkpoints/dpo_v1/final"
 
     # Or compare previously computed eval results (no model loading):
     uv run python scripts/run_targeted_eval.py --from-results

@@ -276,7 +276,7 @@ def main(output_dir: str, max_samples: int, val_ratio: float, sources: str, seed
 
     print("Loading tokenizer (Qwen3.5-4B-Instruct) …")
     tokenizer = AutoTokenizer.from_pretrained(
-        "unsloth/Qwen3.5-4B-Instruct", trust_remote_code=True
+        "unsloth/Qwen3.5-4B", trust_remote_code=True
     )
 
     # Token length filters

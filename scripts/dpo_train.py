@@ -22,7 +22,7 @@ load_dotenv()
 
 ROOT = Path(__file__).parent.parent
 DEFAULT_DPO_CFG_PATH = ROOT / "configs/dpo_config.yaml"
-DEFAULT_BASE_MODEL = "unsloth/Qwen3.5-4B-Instruct"
+DEFAULT_BASE_MODEL = "unsloth/Qwen3.5-4B"
 
 
 def _load_yaml(path: Path) -> dict:
@@ -67,10 +67,10 @@ def _resolve_torch_dtype(torch_module, dtype_name: str):
 def main(sft_checkpoint: str, config_path: str, beta: float | None, exp_id: str) -> None:
     try:
         import torch
+        from unsloth import FastLanguageModel, PatchDPOTrainer
         from datasets import Dataset
         from peft import PeftModel
         from trl import DPOConfig, DPOTrainer
-        from unsloth import FastLanguageModel, PatchDPOTrainer
 
         PatchDPOTrainer()
     except ImportError as e:

@@ -3,7 +3,7 @@
 #   python scripts/dpo_train.py --config-path configs/dpo_config_colab_a100.yaml --sft-checkpoint ...
 
 model:
-  name: "unsloth/Qwen3.5-4B-Instruct"
+  name: "unsloth/Qwen3.5-4B"
   max_seq_length: 2048
   dtype: "bfloat16"
   load_in_4bit: false

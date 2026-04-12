@@ -3,7 +3,7 @@
 #   python scripts/sft_train.py --config-path configs/sft_config_colab_h100.yaml --exp-id sft_targeted
 
 model:
-  name: "unsloth/Qwen3.5-4B-Instruct"
+  name: "unsloth/Qwen3.5-4B"
   max_seq_length: 1024
   load_in_4bit: false
   dtype: "bfloat16"

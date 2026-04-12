@@ -166,7 +166,7 @@ def main(
 
     # ---- Load SFT model ----
     ckpt_path = Path(sft_checkpoint)
-    base_model = "unsloth/Qwen3.5-4B-Instruct"
+    base_model = "unsloth/Qwen3.5-4B"
 
     if ckpt_path.exists() and not (ckpt_path / "config.json").exists():
         print(f"Loading base model {base_model} + LoRA adapter {ckpt_path} (4-bit) …")

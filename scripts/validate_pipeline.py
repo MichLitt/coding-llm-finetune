@@ -1,4 +1,4 @@
-"""Local pipeline validation using Qwen3.5-4B-Instruct (4-bit quantized).
+"""Local pipeline validation using Qwen3.5-4B (4-bit quantized).
 
 Checks that the full SFT training loop works without errors before
 running full-scale training on the complete dataset.
@@ -23,7 +23,7 @@ import click
 ROOT = Path(__file__).parent.parent
 
 VALIDATION_CONFIG = {
-    "model_name": "unsloth/Qwen3.5-4B-Instruct",
+    "model_name": "unsloth/Qwen3.5-4B",
     "load_in_4bit": True,
     "max_seq_length": 1024,
     "lora_r": 8,
