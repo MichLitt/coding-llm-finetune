@@ -4,7 +4,7 @@
 
 model:
   name: "unsloth/Qwen3.5-4B"
-  max_seq_length: 2048            # 从 1024 升至 2048，容纳更长的代码样本
+  max_seq_length: 1024            # 数据已过滤至 ≤1024 token，无需更长
   load_in_4bit: false
   dtype: "bfloat16"
 
