@@ -10,6 +10,7 @@ Usage:
 
 from __future__ import annotations
 
+import inspect
 import json
 import sys
 from pathlib import Path
@@ -54,6 +55,16 @@ def _resolve_torch_dtype(torch_module, dtype_name: str):
         return mapping[dtype_name.lower()]
     except KeyError as exc:
         raise ValueError(f"Unsupported dtype in config: {dtype_name}") from exc
+
+
+def _build_dpo_config(config_cls, kwargs: dict):
+    """Drop kwargs unsupported by the installed TRL version."""
+    valid = set(inspect.signature(config_cls.__init__).parameters)
+    filtered = {key: value for key, value in kwargs.items() if key in valid}
+    dropped = sorted(set(kwargs) - set(filtered))
+    if dropped:
+        print(f"DPOConfig compatibility: ignoring unsupported args {dropped}")
+    return config_cls(**filtered)
 
 
 @click.command()
@@ -155,37 +166,39 @@ def main(sft_checkpoint: str, config_path: str, beta: float | None, exp_id: str)
     train_ds = Dataset.from_list(train_raw)
     val_ds = Dataset.from_list(val_raw)
 
+    dpo_config_kwargs = {
+        "output_dir": str(out_dir),
+        "beta": effective_beta,
+        "loss_type": dpo_cfg.get("loss_type", "sigmoid"),
+        "max_prompt_length": dpo_cfg.get("max_prompt_length", 512),
+        "max_length": dpo_cfg.get("max_length", 1536),
+        "per_device_train_batch_size": train_cfg.get("per_device_train_batch_size", 1),
+        "gradient_accumulation_steps": train_cfg.get("gradient_accumulation_steps", 16),
+        "num_train_epochs": train_cfg.get("num_train_epochs", 1),
+        "learning_rate": train_cfg.get("learning_rate", 5e-5),
+        "lr_scheduler_type": train_cfg.get("lr_scheduler_type", "cosine"),
+        "warmup_ratio": train_cfg.get("warmup_ratio", 0.1),
+        "bf16": train_cfg.get("bf16", True),
+        "tf32": train_cfg.get("tf32", True),
+        "optim": train_cfg.get("optim", "adamw_8bit"),
+        "dataloader_num_workers": train_cfg.get("dataloader_num_workers", 0),
+        "seed": train_cfg.get("seed", 42),
+        "logging_steps": ckpt_cfg.get("logging_steps", 5),
+        "eval_strategy": "steps",
+        "eval_steps": ckpt_cfg.get("eval_steps", 20),
+        "save_steps": ckpt_cfg.get("save_steps", 50),
+        "save_total_limit": ckpt_cfg.get("save_total_limit", 2),
+        "report_to": ckpt_cfg.get("report_to", "none"),
+        "run_name": exp_id,
+    }
+
     trainer = DPOTrainer(
         model=model,
         ref_model=None,
         processing_class=tokenizer,
         train_dataset=train_ds,
         eval_dataset=val_ds,
-        args=DPOConfig(
-            output_dir=str(out_dir),
-            beta=effective_beta,
-            loss_type=dpo_cfg.get("loss_type", "sigmoid"),
-            max_prompt_length=dpo_cfg.get("max_prompt_length", 512),
-            max_length=dpo_cfg.get("max_length", 1536),
-            per_device_train_batch_size=train_cfg.get("per_device_train_batch_size", 1),
-            gradient_accumulation_steps=train_cfg.get("gradient_accumulation_steps", 16),
-            num_train_epochs=train_cfg.get("num_train_epochs", 1),
-            learning_rate=train_cfg.get("learning_rate", 5e-5),
-            lr_scheduler_type=train_cfg.get("lr_scheduler_type", "cosine"),
-            warmup_ratio=train_cfg.get("warmup_ratio", 0.1),
-            bf16=train_cfg.get("bf16", True),
-            tf32=train_cfg.get("tf32", True),
-            optim=train_cfg.get("optim", "adamw_8bit"),
-            dataloader_num_workers=train_cfg.get("dataloader_num_workers", 0),
-            seed=train_cfg.get("seed", 42),
-            logging_steps=ckpt_cfg.get("logging_steps", 5),
-            eval_strategy="steps",
-            eval_steps=ckpt_cfg.get("eval_steps", 20),
-            save_steps=ckpt_cfg.get("save_steps", 50),
-            save_total_limit=ckpt_cfg.get("save_total_limit", 2),
-            report_to=ckpt_cfg.get("report_to", "none"),
-            run_name=exp_id,
-        ),
+        args=_build_dpo_config(DPOConfig, dpo_config_kwargs),
     )
 
     print("\nStarting DPO training ...")

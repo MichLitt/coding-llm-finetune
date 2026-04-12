@@ -10,6 +10,7 @@ Usage:
 
 from __future__ import annotations
 
+import inspect
 import json
 import sys
 from pathlib import Path
@@ -81,6 +82,16 @@ def _resolve_torch_dtype(torch_module, dtype_name: str):
         return mapping[dtype_name.lower()]
     except KeyError as exc:
         raise ValueError(f"Unsupported dtype in config: {dtype_name}") from exc
+
+
+def _build_sft_config(config_cls, kwargs: dict):
+    """Drop kwargs unsupported by the installed TRL version."""
+    valid = set(inspect.signature(config_cls.__init__).parameters)
+    filtered = {key: value for key, value in kwargs.items() if key in valid}
+    dropped = sorted(set(kwargs) - set(filtered))
+    if dropped:
+        print(f"SFTConfig compatibility: ignoring unsupported args {dropped}")
+    return config_cls(**filtered)
 
 
 @click.command()
@@ -197,39 +208,41 @@ def main(
     train_ds = Dataset.from_list([to_text(sample) for sample in train_raw])
     val_ds = Dataset.from_list([to_text(sample) for sample in val_raw])
 
+    sft_config_kwargs = {
+        "output_dir": str(out_dir),
+        "per_device_train_batch_size": train_cfg["per_device_train_batch_size"],
+        "gradient_accumulation_steps": train_cfg["gradient_accumulation_steps"],
+        "num_train_epochs": n_epochs,
+        "learning_rate": train_cfg["learning_rate"],
+        "lr_scheduler_type": train_cfg["lr_scheduler_type"],
+        "warmup_ratio": train_cfg["warmup_ratio"],
+        "weight_decay": train_cfg["weight_decay"],
+        "max_grad_norm": train_cfg["max_grad_norm"],
+        "bf16": train_cfg.get("bf16", False),
+        "tf32": train_cfg.get("tf32", True),
+        "optim": train_cfg["optim"],
+        "dataloader_num_workers": train_cfg.get("dataloader_num_workers", 0),
+        "group_by_length": train_cfg.get("group_by_length", False),
+        "seed": train_cfg["seed"],
+        "eval_strategy": "steps",
+        "logging_steps": ckpt_cfg["logging_steps"],
+        "eval_steps": ckpt_cfg["eval_steps"],
+        "save_steps": ckpt_cfg["save_steps"],
+        "save_total_limit": ckpt_cfg["save_total_limit"],
+        "load_best_model_at_end": ckpt_cfg["load_best_model_at_end"],
+        "metric_for_best_model": ckpt_cfg["metric_for_best_model"],
+        "report_to": ckpt_cfg.get("report_to", "none"),
+        "dataset_text_field": data_cfg.get("dataset_text_field", "text"),
+        "max_seq_length": max_seq_len,
+        "run_name": exp_id,
+    }
+
     trainer = SFTTrainer(
         model=model,
         tokenizer=tokenizer,
         train_dataset=train_ds,
         eval_dataset=val_ds,
-        args=SFTConfig(
-            output_dir=str(out_dir),
-            per_device_train_batch_size=train_cfg["per_device_train_batch_size"],
-            gradient_accumulation_steps=train_cfg["gradient_accumulation_steps"],
-            num_train_epochs=n_epochs,
-            learning_rate=train_cfg["learning_rate"],
-            lr_scheduler_type=train_cfg["lr_scheduler_type"],
-            warmup_ratio=train_cfg["warmup_ratio"],
-            weight_decay=train_cfg["weight_decay"],
-            max_grad_norm=train_cfg["max_grad_norm"],
-            bf16=train_cfg.get("bf16", False),
-            tf32=train_cfg.get("tf32", True),
-            optim=train_cfg["optim"],
-            dataloader_num_workers=train_cfg.get("dataloader_num_workers", 0),
-            group_by_length=train_cfg.get("group_by_length", False),
-            seed=train_cfg["seed"],
-            eval_strategy="steps",
-            logging_steps=ckpt_cfg["logging_steps"],
-            eval_steps=ckpt_cfg["eval_steps"],
-            save_steps=ckpt_cfg["save_steps"],
-            save_total_limit=ckpt_cfg["save_total_limit"],
-            load_best_model_at_end=ckpt_cfg["load_best_model_at_end"],
-            metric_for_best_model=ckpt_cfg["metric_for_best_model"],
-            report_to=ckpt_cfg.get("report_to", "none"),
-            dataset_text_field=data_cfg.get("dataset_text_field", "text"),
-            max_seq_length=max_seq_len,
-            run_name=exp_id,
-        ),
+        args=_build_sft_config(SFTConfig, sft_config_kwargs),
     )
 
     trainer = train_on_responses_only(
