@@ -31,6 +31,7 @@ import time
 from pathlib import Path
 
 import click
+import anthropic
 from dotenv import load_dotenv
 from openai import OpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -41,7 +42,9 @@ load_dotenv()
 ROOT = Path(__file__).parent.parent
 RAW_PATH    = ROOT / "data/processed/targeted/targeted_raw.jsonl"
 OUT_PATH    = ROOT / "data/processed/targeted/targeted_filtered.jsonl"
-HE_DATA_PATH = Path("d:/Project/Toy/Coder-Agent/coder_agent/eval/benchmarks/humaneval_data.jsonl")
+HE_DATA_PATH = Path(
+    os.environ.get("HE_DATA_PATH", str(ROOT / "data/raw/humaneval_data.jsonl"))
+)
 
 SYSTEM_PROMPT = (
     "You are an expert Python programmer. Write clean, efficient, and correct code. "
@@ -113,21 +116,35 @@ FAILURE_PATTERNS: dict[str, dict] = {
 
 
 # ---------------------------------------------------------------------------
-# API client
+# API backends: GLM (OpenAI SDK) + MiniMax M2.7 (Anthropic SDK)
 # ---------------------------------------------------------------------------
 
-def _make_client() -> OpenAI:
-    api_key = os.environ.get("MINIMAX_API_KEY")
-    base_url = os.environ.get("MINIMAX_BASE_URL", "https://api.minimax.io/v1")
+GLM_DEFAULT_MODEL = os.environ.get("GLM_MODEL", "glm-4-flash")
+MINIMAX_DEFAULT_MODEL = os.environ.get("MINIMAX_MODEL", "MiniMax-M2.7")
+
+
+def _make_glm_client() -> OpenAI:
+    api_key = os.environ.get("GLM_API_KEY")
+    base_url = os.environ.get("GLM_BASE_URL")
     if not api_key:
-        raise RuntimeError("MINIMAX_API_KEY not set. Copy .env.example to .env and fill in your key.")
+        raise RuntimeError("GLM_API_KEY not set in .env")
     return OpenAI(api_key=api_key, base_url=base_url)
 
 
+def _make_minimax_client() -> anthropic.Anthropic:
+    api_key = os.environ.get("MINIMAX_API_KEY")
+    base_url = os.environ.get("MINIMAX_BASE_URL", "https://api.minimax.io/v1")
+    # Anthropic SDK appends /v1/messages, strip trailing /v1 to avoid double path
+    base_url = re.sub(r"/v1/?$", "", base_url)
+    if not api_key:
+        raise RuntimeError("MINIMAX_API_KEY not set in .env")
+    return anthropic.Anthropic(api_key=api_key, base_url=base_url)
+
+
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=15))
-def _call_api(client: OpenAI, messages: list[dict], temperature: float = 0.7, model: str = "MiniMax-M2.5") -> str:
+def _call_glm(client: OpenAI, messages: list[dict], temperature: float = 0.7) -> str:
     resp = client.chat.completions.create(
-        model=model,
+        model=GLM_DEFAULT_MODEL,
         messages=messages,
         temperature=temperature,
         max_tokens=2048,
@@ -135,21 +152,56 @@ def _call_api(client: OpenAI, messages: list[dict], temperature: float = 0.7, mo
     return resp.choices[0].message.content or ""
 
 
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=15))
+def _call_minimax(client: anthropic.Anthropic, messages: list[dict], temperature: float = 0.7) -> str:
+    # Anthropic SDK: system is a separate parameter
+    system = ""
+    chat_messages = []
+    for msg in messages:
+        if msg["role"] == "system":
+            system = msg["content"]
+        else:
+            chat_messages.append(msg)
+    resp = client.messages.create(
+        model=MINIMAX_DEFAULT_MODEL,
+        max_tokens=2048,
+        system=system,
+        messages=chat_messages,
+        temperature=temperature,
+    )
+    # M2.7 returns [ThinkingBlock, TextBlock] — extract the text block
+    for block in resp.content:
+        if block.type == "text":
+            return block.text or ""
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # Parsing helpers
 # ---------------------------------------------------------------------------
 
-_PROBLEM_RE = re.compile(r"PROBLEM\s*[:\-]?\s*(.+?)(?=SOLUTION|$)", re.DOTALL | re.IGNORECASE)
+_PROBLEM_RE = re.compile(r"\bPROBLEM\b\s*\d*\s*[:\-]?\s*(.+?)(?=\bSOLUTION\b|$)", re.DOTALL | re.IGNORECASE)
 _SOLUTION_CODE_RE = re.compile(r"```python\s*(.*?)```", re.DOTALL | re.IGNORECASE)
-_SOLUTION_BLOCK_RE = re.compile(r"SOLUTION\s*[:\-]?\s*(.+?)(?=PROBLEM|$)", re.DOTALL | re.IGNORECASE)
+_SOLUTION_BLOCK_RE = re.compile(r"\bSOLUTION\b\s*\d*\s*[:\-]?\s*(.+?)(?=\bPROBLEM\b|$)", re.DOTALL | re.IGNORECASE)
+
+
+def _strip_thinking(text: str) -> str:
+    """Remove <think>/<thinking> blocks from model output."""
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<thinking>.*?</thinking>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    return text.strip()
 
 
 def _parse_pairs(text: str) -> list[tuple[str, str]]:
     """Parse PROBLEM/SOLUTION pairs from API response."""
+    text = _strip_thinking(text)
     pairs: list[tuple[str, str]] = []
 
-    # Split on numbered sections if present: "1. PROBLEM:"
-    chunks = re.split(r"\n(?=\d+\.\s*PROBLEM)", text)
+    # Split on numbered sections: "1. PROBLEM:", "1) PROBLEM:", etc.
+    chunks = re.split(r"\n(?=\d+[\.\)]\s*PROBLEM\b)", text, flags=re.IGNORECASE)
+    if len(chunks) <= 1:
+        # Try unnumbered PROBLEM markers
+        chunks = re.split(r"\n(?=PROBLEM\b\s*\d*\s*[:\-])", text, flags=re.IGNORECASE)
     if len(chunks) <= 1:
         chunks = [text]
 
@@ -160,7 +212,7 @@ def _parse_pairs(text: str) -> list[tuple[str, str]]:
         if problem_m and code_m:
             problem = problem_m.group(1).strip()
             # Clean up: remove everything after SOLUTION marker
-            problem = re.split(r"SOLUTION", problem, flags=re.I)[0].strip()
+            problem = re.split(r"\bSOLUTION\b", problem, flags=re.I)[0].strip()
             code = code_m.group(1).strip()
             if problem and code:
                 pairs.append((problem, code))
@@ -262,15 +314,27 @@ def _load_humaneval_data() -> dict:
               help="Target number of valid samples per failure pattern (25 × 8 patterns = 200 total).")
 @click.option("--batch-size", default=8, show_default=True,
               help="Number of problems to request per API call.")
-@click.option("--model", default="MiniMax-M2.5", show_default=True,
-              help="MiniMax model name.")
+@click.option("--backends", default="glm,minimax", show_default=True,
+              help="Comma-separated backends to use. Alternates between them for diversity.")
 @click.option("--temperature", default=0.7, show_default=True)
 @click.option("--validate-he/--no-validate-he", default=False,
               help="Run HumanEval check() on generated code for the 8 target tasks.")
-def main(target_per_pattern: int, batch_size: int, model: str, temperature: float, validate_he: bool):
+def main(target_per_pattern: int, batch_size: int, backends: str, temperature: float, validate_he: bool):
     RAW_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-    client = _make_client()
+    # Initialize backends
+    backend_list = [b.strip() for b in backends.split(",") if b.strip()]
+    clients: dict[str, tuple] = {}  # name -> (client, call_fn)
+    for name in backend_list:
+        if name == "glm":
+            clients[name] = (_make_glm_client(), _call_glm)
+        elif name == "minimax":
+            clients[name] = (_make_minimax_client(), _call_minimax)
+        else:
+            raise click.BadParameter(f"Unknown backend: {name}. Use 'glm' or 'minimax'.")
+    backend_names = list(clients.keys())
+    print(f"Backends: {', '.join(f'{n} ({type(c).__name__})' for n, (c, _) in clients.items())}\n")
+
     he_data = _load_humaneval_data() if validate_he else {}
     existing = _load_existing(RAW_PATH)
 
@@ -280,6 +344,7 @@ def main(target_per_pattern: int, batch_size: int, model: str, temperature: floa
         print(f"  Already have {cnt} samples for {pk}")
 
     raw_fp = RAW_PATH.open("a", encoding="utf-8")
+    call_idx = 0  # round-robin counter for backend alternation
 
     try:
         for pattern_key, pattern in FAILURE_PATTERNS.items():
@@ -297,26 +362,29 @@ def main(target_per_pattern: int, batch_size: int, model: str, temperature: floa
             with tqdm(total=needed, desc=pattern_key, unit="sample") as pbar:
                 while generated < needed and attempts < max_attempts:
                     attempts += 1
+                    # Round-robin between backends
+                    bname = backend_names[call_idx % len(backend_names)]
+                    client, call_fn = clients[bname]
+                    call_idx += 1
+
                     cur_batch = min(batch_size, needed - generated)
                     messages  = _build_prompt(pattern_key, pattern, cur_batch)
                     try:
-                        raw_text = _call_api(client, messages, temperature=temperature, model=model)
+                        raw_text = call_fn(client, messages, temperature=temperature)
                     except Exception as e:
-                        print(f"  API error: {e}", file=sys.stderr)
+                        print(f"  [{bname}] API error: {e}", file=sys.stderr)
                         time.sleep(5)
                         continue
 
                     pairs = _parse_pairs(raw_text)
                     if not pairs:
-                        time.sleep(1)  # rate-limit courtesy sleep on empty response
+                        time.sleep(1)
                         continue
                     for problem, code in pairs:
                         if not _validate_syntax(code):
                             continue
-                        # Optional: validate against HumanEval test suite
                         if validate_he and pattern.get("task_id"):
                             result = _validate_with_humaneval(code, pattern["task_id"], he_data)
-                            # result=None means test not found; result=False means wrong → skip
                             if result is False:
                                 continue
 
@@ -329,6 +397,7 @@ def main(target_per_pattern: int, batch_size: int, model: str, temperature: floa
                             "source": "targeted",
                             "pattern_key": pattern_key,
                             "task_id": None,
+                            "backend": bname,
                         }
                         raw_fp.write(json.dumps(record, ensure_ascii=False) + "\n")
                         raw_fp.flush()

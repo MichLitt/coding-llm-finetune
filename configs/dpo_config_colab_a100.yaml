@@ -1,0 +1,56 @@
+# DPO training profile for Colab Pro A100 80 GB.
+# Usage:
+#   python scripts/dpo_train.py --config-path configs/dpo_config_colab_a100.yaml --sft-checkpoint ...
+
+model:
+  name: "unsloth/Qwen3.5-4B-Instruct"
+  max_seq_length: 2048
+  dtype: "bfloat16"
+  load_in_4bit: false
+
+lora:
+  r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  bias: "none"
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+  use_gradient_checkpointing: "unsloth"
+  random_state: 42
+
+dpo:
+  beta: 0.1
+  loss_type: "sigmoid"
+  max_prompt_length: 512
+  max_length: 1536
+
+training:
+  per_device_train_batch_size: 4
+  gradient_accumulation_steps: 4
+  num_train_epochs: 1
+  learning_rate: 5.0e-5
+  lr_scheduler_type: "cosine"
+  warmup_ratio: 0.1
+  bf16: true
+  tf32: true
+  optim: "adamw_torch_fused"
+  dataloader_num_workers: 2
+  seed: 42
+
+checkpointing:
+  output_dir: "results/dpo_checkpoints"
+  logging_steps: 5
+  eval_steps: 50
+  save_steps: 100
+  save_total_limit: 2
+  report_to: "wandb"
+
+data:
+  train_file: "data/processed/dpo_pairs.jsonl"
+  val_file: "data/processed/dpo_pairs_val.jsonl"

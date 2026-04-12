@@ -110,6 +110,45 @@ def has_obvious_issue(code: str) -> bool:
     return False
 
 
+# ---- HumanEval contamination filter -----------------------------------------
+
+# Compound / unique HumanEval entry-point names.  Samples whose code defines
+# one of these functions (via ``def name(``) are filtered to prevent benchmark
+# contamination.  Generic single-word names (is_prime, remove_duplicates, …)
+# are excluded to avoid false positives on ordinary CS exercises.
+_HE_FUNC_NAMES: set[str] = {
+    "has_close_elements", "separate_paren_groups", "truncate_number",
+    "below_zero", "mean_absolute_deviation", "intersperse", "parse_nested_parens",
+    "filter_by_substring", "sum_product", "rolling_max", "make_palindrome",
+    "string_xor", "greatest_common_divisor", "all_prefixes",
+    "string_sequence", "count_distinct_characters", "parse_music",
+    "how_many_times", "sort_numbers", "find_closest_elements", "rescale_to_unit",
+    "filter_integers", "fibfib", "vowels_count",
+    "circular_shift", "digitSum", "fruit_distribution", "pluck",
+    "strange_sort_list", "triangle_area", "will_it_fly", "smallest_change",
+    "total_match", "is_multiply_prime", "is_simple_power", "iscube",
+    "hex_key", "decimal_to_binary", "is_happy", "numerical_letter_grade",
+    "prime_length", "starts_one_ends", "anti_shuffle", "get_row",
+    "sort_array", "next_smallest", "is_bored", "any_int",
+    "skjkasdkd", "check_dict_case", "count_up_to",
+    "count_upper", "closest_integer", "make_a_pile", "words_string",
+    "choose_num", "rounded_avg", "unique_digits", "by_length", "even_odd_count",
+    "int_to_mini_roman", "right_angle_triangle", "find_max", "do_algebra",
+    "string_to_md5", "generate_integers",
+    # targeted failure-pattern functions (including names excluded from
+    # instruction-side matching because they are generic as free text)
+    "same_chars", "fib", "minSubArraySum", "intersection",
+    "prod_signs", "tri", "file_name_check", "get_max_triples",
+}
+
+_HE_DEF_PATTERNS: set[str] = {f"def {n}(" for n in _HE_FUNC_NAMES}
+
+
+def has_he_func_def(code: str) -> bool:
+    """Return True if *code* defines a known HumanEval entry-point function."""
+    return any(p in code for p in _HE_DEF_PATTERNS)
+
+
 # ---- MinHash helpers ---------------------------------------------------------
 
 def _trigrams(text: str) -> list[str]:
@@ -235,9 +274,9 @@ def main(output_dir: str, max_samples: int, val_ratio: float, sources: str, seed
     out = ROOT / output_dir
     out.mkdir(parents=True, exist_ok=True)
 
-    print("Loading tokenizer (Qwen3.5-9B) …")
+    print("Loading tokenizer (Qwen3.5-4B-Instruct) …")
     tokenizer = AutoTokenizer.from_pretrained(
-        "unsloth/Qwen3.5-9B", trust_remote_code=True
+        "unsloth/Qwen3.5-4B-Instruct", trust_remote_code=True
     )
 
     # Token length filters
@@ -269,6 +308,13 @@ def main(output_dir: str, max_samples: int, val_ratio: float, sources: str, seed
     all_samples = deduplicate(all_samples)
     print(f"After dedup:  {len(all_samples)} samples")
 
+    # HumanEval contamination filter
+    pre_filter = len(all_samples)
+    all_samples = [s for s in all_samples if not has_he_func_def(s["messages"][2]["content"])]
+    n_contaminated = pre_filter - len(all_samples)
+    if n_contaminated:
+        print(f"Removed {n_contaminated} samples with HumanEval function definitions (contamination filter)")
+
     # Optional cap
     if max_samples and len(all_samples) > max_samples:
         # Always keep targeted samples
@@ -289,12 +335,16 @@ def main(output_dir: str, max_samples: int, val_ratio: float, sources: str, seed
     train_path = out / "sft_train.jsonl"
     val_path   = out / "sft_val.jsonl"
 
+    def _safe_dumps(obj: dict) -> str:
+        s = json.dumps(obj, ensure_ascii=False)
+        return s.replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+
     train_path.write_text(
-        "\n".join(json.dumps(s, ensure_ascii=False) for s in train_samples) + "\n",
+        "\n".join(_safe_dumps(s) for s in train_samples) + "\n",
         encoding="utf-8",
     )
     val_path.write_text(
-        "\n".join(json.dumps(s, ensure_ascii=False) for s in val_samples) + "\n",
+        "\n".join(_safe_dumps(s) for s in val_samples) + "\n",
         encoding="utf-8",
     )
 
