@@ -95,8 +95,8 @@ Final dataset: ~3,700 samples (2K magicoder + 1.5K evol + 200 targeted)
 ### Phase 1: SFT Training (Local RTX 5070)
 
 ```bash
-uv run python scripts/sft_train.py --experiment sft_targeted
-uv run python scripts/sft_train.py --experiment sft_generic   # ablation
+uv run python scripts/sft_train.py --exp-id sft_targeted
+uv run python scripts/sft_train.py --exp-id sft_generic   # ablation
 ```
 
 Key config: LoRA r=32, alpha=64, 3 epochs, lr=2e-4, 4-bit quantization
@@ -105,9 +105,13 @@ Key config: LoRA r=32, alpha=64, 3 epochs, lr=2e-4, 4-bit quantization
 
 ```bash
 # Generate pairs from MBPP (not HumanEval — keeping eval set clean)
-uv run python scripts/generate_dpo_pairs.py --source mbpp --target-pairs 500
+uv run python scripts/generate_dpo_pairs.py \
+    --sft-checkpoint results/sft_targeted/final \
+    --num-problems 250
 
-uv run python scripts/dpo_train.py --sft-checkpoint results/sft_targeted/final
+uv run python scripts/dpo_train.py \
+    --sft-checkpoint results/sft_targeted/final \
+    --exp-id dpo_v1
 ```
 
 Key config: LoRA r=16, beta=0.1, execution-driven pairs (MBPP unit tests)
