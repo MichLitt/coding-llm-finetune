@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Sync locked dependencies
+        run: uv sync --frozen
+
+      - name: Verify lockfile consistency
+        run: uv lock --check
+
+      - name: Smoke offline pipeline commands
+        run: |
+          uv run python scripts/prepare_sft_data.py --help
+          uv run python scripts/check_contamination.py --help
+          uv run python scripts/sft_train.py --help
+          uv run python scripts/generate_dpo_pairs.py --help
+          uv run python scripts/dpo_train.py --help
