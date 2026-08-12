@@ -1,7 +1,7 @@
 [project]
 name = "coding-llm"
-version = "0.2.0"
-description = "CodeTune v2: SFT+DPO post-training pipeline for Qwen2.5-Coder-7B"
+version = "0.3.0"
+description = "CodeTune v3: clean SFT+DPO post-training pipeline for Qwen3.5-4B-Instruct"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

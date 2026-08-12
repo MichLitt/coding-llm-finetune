@@ -34,7 +34,6 @@ Thumbs.db
 
 # Claude Code settings (local IDE config)
 .claude/
-CLAUDE.md
 
 # WandB
 wandb/
