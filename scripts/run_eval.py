@@ -96,15 +96,37 @@ def judge_generation(dataset: str, task: dict, text: str, finished: bool, timeou
     return {"status": status, "solution": extraction.code, "detail": failure or ""}
 
 
-def run_evalplus(dataset: str, samples_path: Path) -> dict[str, dict]:
+def _same_code(a: str, b: str) -> bool:
+    norm = lambda t: "\n".join(line.rstrip() for line in t.strip().splitlines())
+    return norm(a) == norm(b)
+
+
+def run_evalplus(dataset: str, samples_path: Path, expected: dict[str, str] | None = None) -> dict[str, dict]:
     """Run evalplus and return ``{task_id: {"base": status, "plus": status}}``.
 
     evalplus applies OS resource limits that only work on Linux (Colab).
+
+    evalplus silently reuses an existing ``<samples>_eval_results.json`` ("Load from previous
+    results"), which once attached the verdicts of an OLD run to freshly generated code. So the
+    stale file is deleted first (which also avoids evalplus' interactive overwrite prompt) and,
+    when ``expected`` (``{task_id: solution}``) is given, every returned entry must carry the
+    code we submitted.
     """
-    subprocess.run([sys.executable, "-m", "evalplus.evaluate", dataset, "--samples", str(samples_path)],
-                   check=True)
     results_path = samples_path.with_name(samples_path.stem + "_eval_results.json")
+    results_path.unlink(missing_ok=True)
+    subprocess.run([sys.executable, "-m", "evalplus.evaluate", dataset, "--samples", str(samples_path)],
+                   check=True, stdin=subprocess.DEVNULL)
+    if not results_path.exists():
+        raise RuntimeError(f"evalplus did not write {results_path}")
     data = json.loads(results_path.read_text(encoding="utf-8"))
+    if expected is not None:
+        stale = [t for t, entries in data["eval"].items()
+                 if t in expected and not _same_code(entries[0].get("solution", ""), expected[t])]
+        missing = sorted(set(expected) - set(data["eval"]))
+        if stale or missing:
+            raise RuntimeError(
+                f"evalplus results do not match the submitted samples (stale results?): "
+                f"{len(stale)} mismatched (e.g. {stale[:3]}), {len(missing)} missing (e.g. {missing[:3]})")
     return {
         task_id: {"base": entries[0]["base_status"], "plus": entries[0]["plus_status"]}
         for task_id, entries in data["eval"].items()
@@ -185,11 +207,8 @@ def _git_commit() -> str:
         return "unknown"
 
 
-def evaluate(generator, tokenizer, dataset: str, tasks: list[dict], max_new_tokens: int,
-             timeout: float) -> tuple[list[dict], list[dict]]:
-    """Generate and judge. Returns (records, raw_rows)."""
-    prompts = [cc.render_prompt(tokenizer, task["messages"]) for task in tasks]
-    outs = generator.generate(prompts, max_new_tokens=max_new_tokens, temperature=0.0)
+def judge_all(dataset: str, tasks: list[dict], outs: list, timeout: float) -> tuple[list[dict], list[dict]]:
+    """Judge generations. Returns (records, raw_rows)."""
     records, raw_rows = [], []
     for task, out in zip(tasks, outs):
         rec = {"task_id": task["task_id"], "n_tokens": out.n_tokens, "hit_token_limit": not out.finished}
@@ -198,6 +217,30 @@ def evaluate(generator, tokenizer, dataset: str, tasks: list[dict], max_new_toke
         raw_rows.append({"task_id": task["task_id"], "raw": out.text,
                          "n_tokens": out.n_tokens, "finished": out.finished})
     return records, raw_rows
+
+
+def evaluate(generator, tokenizer, dataset: str, tasks: list[dict], max_new_tokens: int,
+             timeout: float) -> tuple[list[dict], list[dict]]:
+    """Generate and judge. Returns (records, raw_rows)."""
+    prompts = [cc.render_prompt(tokenizer, task["messages"]) for task in tasks]
+    outs = generator.generate(prompts, max_new_tokens=max_new_tokens, temperature=0.0)
+    return judge_all(dataset, tasks, outs, timeout)
+
+
+def load_raw_outputs(out_dir: Path, tasks: list[dict]) -> list:
+    """Re-load saved generations (``raw.jsonl``) in task order, for ``--rejudge``."""
+    from model_io import GenOut
+
+    rows = {}
+    for line in (out_dir / "raw.jsonl").read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            row = json.loads(line)
+            rows[row["task_id"]] = row
+    missing = [t["task_id"] for t in tasks if t["task_id"] not in rows]
+    if missing:
+        raise RuntimeError(f"{out_dir}/raw.jsonl lacks {len(missing)} tasks (e.g. {missing[:3]})")
+    return [GenOut(text=rows[t["task_id"]]["raw"], n_tokens=rows[t["task_id"]]["n_tokens"],
+                   finished=rows[t["task_id"]]["finished"]) for t in tasks]
 
 
 def write_outputs(out_dir: Path, records: list[dict], raw_rows: list[dict], summary: dict) -> None:
@@ -225,27 +268,41 @@ def write_outputs(out_dir: Path, records: list[dict], raw_rows: list[dict], summ
 @click.option("--subset", default=None, help="Comma-separated task ids or numbers (debugging).")
 @click.option("--skip-evalplus", is_flag=True, help="Skip evalplus (HumanEval+/MBPP+ tests). Local debugging only.")
 @click.option("--results-dir", default=str(RESULTS_DIR), show_default=True)
-def main(model, label, dataset, backend, max_new_tokens, timeout, batch_size, subset, skip_evalplus, results_dir):
-    from model_io import load_generator
-
+@click.option("--rejudge", is_flag=True,
+              help="Do not load a model: re-judge the saved raw.jsonl of this label/dataset (fresh evalplus run). "
+                   "Use after a harness fix; --model is then only recorded.")
+def main(model, label, dataset, backend, max_new_tokens, timeout, batch_size, subset, skip_evalplus, results_dir,
+         rejudge):
     tasks = load_tasks(dataset, subset.split(",") if subset else None)
-    print(f"[{label}] {dataset}: {len(tasks)} tasks")
-    generator = load_generator(model, backend=backend, batch_size=batch_size)
-    tokenizer = getattr(generator, "tokenizer", None)
-    if tokenizer is None:  # vLLM: use the HF tokenizer only for chat templating
-        from transformers import AutoTokenizer
-        tokenizer = AutoTokenizer.from_pretrained(model if not Path(model, "adapter_config.json").exists()
-                                                  else "unsloth/Qwen3.5-4B")
-
-    records, raw_rows = evaluate(generator, tokenizer, dataset, tasks, max_new_tokens, timeout)
+    print(f"[{label}] {dataset}: {len(tasks)} tasks{' (rejudge)' if rejudge else ''}")
     out_dir = Path(results_dir) / label / dataset
+
+    if rejudge:
+        previous = {}
+        if (out_dir / "summary.json").exists():
+            previous = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
+        records, raw_rows = judge_all(dataset, tasks, load_raw_outputs(out_dir, tasks), timeout)
+        max_new_tokens = previous.get("max_new_tokens", max_new_tokens)
+        backend = previous.get("backend", backend)
+    else:
+        from model_io import load_generator
+
+        generator = load_generator(model, backend=backend, batch_size=batch_size)
+        tokenizer = getattr(generator, "tokenizer", None)
+        if tokenizer is None:  # vLLM: use the HF tokenizer only for chat templating
+            from transformers import AutoTokenizer
+            tokenizer = AutoTokenizer.from_pretrained(model if not Path(model, "adapter_config.json").exists()
+                                                      else "unsloth/Qwen3.5-4B")
+        records, raw_rows = evaluate(generator, tokenizer, dataset, tasks, max_new_tokens, timeout)
     write_outputs(out_dir, records, raw_rows, {})
 
     if not skip_evalplus:
-        apply_evalplus(dataset, records, run_evalplus(dataset, out_dir / "samples.jsonl"))
+        expected = {r["task_id"]: r["solution"] or "# no code extracted\n" for r in records}
+        apply_evalplus(dataset, records, run_evalplus(dataset, out_dir / "samples.jsonl", expected))
     summary = summarize(dataset, records)
     summary.update({"label": label, "model": model, "backend": backend, "max_new_tokens": max_new_tokens,
-                    "decoding": "greedy", "thinking": False, "precision": "bf16", "git_commit": _git_commit()})
+                    "decoding": "greedy", "thinking": False, "precision": "bf16", "git_commit": _git_commit(),
+                    "rejudged": rejudge})
     write_outputs(out_dir, records, raw_rows, summary)
 
     print(f"\n{'=' * 60}\n{label} / {dataset}: pass@1 = {summary['passed']}/{summary['total']} "

@@ -1,6 +1,7 @@
 """Harness tests with a fake generator (no GPU, no datasets download)."""
 
 import json
+from pathlib import Path
 
 import codegen_common as cc
 import run_eval
@@ -110,3 +111,81 @@ def test_eval_gate_flags_harness_induced_failures():
     assert not all(run_eval.eval_gate(junky).values())
     disagree = dict(good, executor_disagreements=["HumanEval/1"])
     assert not run_eval.eval_gate(disagree)["executors_agree"]
+
+
+# ---- evalplus staleness guard and --rejudge ------------------------------------------------
+
+def _fake_evalplus(monkeypatch, write=None):
+    """Replace the evalplus subprocess. ``write(results_path)`` simulates evalplus output."""
+    calls = []
+
+    def fake_run(cmd, check, stdin=None):
+        samples = Path(cmd[cmd.index("--samples") + 1])
+        results = samples.with_name(samples.stem + "_eval_results.json")
+        calls.append(results.exists())          # was a stale file still present when evalplus started?
+        if write:
+            write(results)
+
+    monkeypatch.setattr(run_eval.subprocess, "run", fake_run)
+    return calls
+
+
+def _results(entries):
+    return {"eval": {t: [{"task_id": t, "solution": sol, "base_status": b, "plus_status": p}]
+                     for t, (sol, b, p) in entries.items()}}
+
+
+def test_run_evalplus_deletes_stale_results_and_returns_fresh_ones(tmp_path, monkeypatch):
+    samples = tmp_path / "samples.jsonl"
+    samples.write_text("")
+    stale = tmp_path / "samples_eval_results.json"
+    stale.write_text(json.dumps(_results({"HumanEval/0": ("old code", "pass", "pass")})))
+
+    def write(results_path):
+        results_path.write_text(json.dumps(_results({"HumanEval/0": ("new code\n", "fail", "fail")})))
+
+    calls = _fake_evalplus(monkeypatch, write)
+    out = run_eval.run_evalplus("humaneval", samples, {"HumanEval/0": "new code"})
+    assert calls == [False], "stale results must be removed before evalplus runs"
+    assert out == {"HumanEval/0": {"base": "fail", "plus": "fail"}}
+
+
+def test_run_evalplus_rejects_results_for_different_code(tmp_path, monkeypatch):
+    import pytest
+    samples = tmp_path / "samples.jsonl"
+    samples.write_text("")
+    _fake_evalplus(monkeypatch, lambda p: p.write_text(json.dumps(_results({"HumanEval/0": ("old code", "pass", "pass")}))))
+    with pytest.raises(RuntimeError, match="do not match"):
+        run_eval.run_evalplus("humaneval", samples, {"HumanEval/0": "new code"})
+
+
+def test_run_evalplus_rejects_missing_tasks_and_missing_file(tmp_path, monkeypatch):
+    import pytest
+    samples = tmp_path / "samples.jsonl"
+    samples.write_text("")
+    _fake_evalplus(monkeypatch, lambda p: p.write_text(json.dumps(_results({"HumanEval/0": ("a", "pass", "pass")}))))
+    with pytest.raises(RuntimeError, match="1 missing"):
+        run_eval.run_evalplus("humaneval", samples, {"HumanEval/0": "a", "HumanEval/1": "b"})
+    _fake_evalplus(monkeypatch, None)
+    (tmp_path / "samples_eval_results.json").unlink(missing_ok=True)
+    with pytest.raises(RuntimeError, match="did not write"):
+        run_eval.run_evalplus("humaneval", samples, None)
+
+
+def test_rejudge_roundtrip_reproduces_statuses_without_a_model(tmp_path):
+    outs = [GenOut("```python\ndef add(a, b):\n    return a + b\n```", 20, True),
+            GenOut("```python\ndef add(a, b):\n    return a +", 1024, False)]
+    tasks = he_tasks(2)
+    records, raw_rows = run_eval.judge_all("humaneval", tasks, outs, timeout=5)
+    run_eval.write_outputs(tmp_path, records, raw_rows, {})
+    reloaded = run_eval.load_raw_outputs(tmp_path, tasks)
+    assert [(o.text, o.n_tokens, o.finished) for o in reloaded] == [(o.text, o.n_tokens, o.finished) for o in outs]
+    again, _ = run_eval.judge_all("humaneval", tasks, reloaded, timeout=5)
+    assert [r["status"] for r in again] == [r["status"] for r in records] == [cc.PASS, cc.TRUNCATED]
+
+
+def test_rejudge_fails_loudly_when_raw_is_incomplete(tmp_path):
+    import pytest
+    (tmp_path / "raw.jsonl").write_text(json.dumps({"task_id": "HumanEval/0", "raw": "x", "n_tokens": 1, "finished": True}) + "\n")
+    with pytest.raises(RuntimeError, match="lacks 1 tasks"):
+        run_eval.load_raw_outputs(tmp_path, he_tasks(2))
