@@ -1,4 +1,4 @@
-# DPO training profile for Colab Pro A100 80 GB.
+# DPO training profile for Colab A100 (40 or 80 GB).
 # Usage:
 #   python scripts/dpo_train.py --config-path configs/dpo_config_colab_a100.yaml --sft-checkpoint ...
 
@@ -31,8 +31,8 @@ dpo:
   max_length: 1536
 
 training:
-  per_device_train_batch_size: 8
-  gradient_accumulation_steps: 2
+  per_device_train_batch_size: 4   # 40 GB-safe; effective batch = 4 x 4 = 16 (unchanged)
+  gradient_accumulation_steps: 4
   num_train_epochs: 1
   learning_rate: 5.0e-6            # conservative first run; raise to 2e-5 only if reward margins barely move
   lr_scheduler_type: "cosine"

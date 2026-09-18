@@ -1,4 +1,4 @@
-# SFT training profile for Colab Pro A100 80 GB.
+# SFT training profile for Colab A100 (40 or 80 GB).
 # The single reference profile for v3.1 (the H100 profile is identical). LoRA r/alpha,
 # learning rate, epochs and data sources are owned by configs/ablation_matrix.yaml;
 # the values under `lora:`/`learning_rate` below are only fallbacks.
@@ -28,8 +28,9 @@ lora:
   random_state: 42
 
 training:
-  per_device_train_batch_size: 32  # 从 16 升至 32，预计用 ~45 GB VRAM
-  gradient_accumulation_steps: 2   # effective batch: 64，梯度估计更稳定
+  per_device_train_batch_size: 16  # sized for a 40 GB A100 (the Colab A100 seen in practice); batch 32 was
+                                   # an ~45 GB estimate for 80 GB cards. Effective batch is unchanged.
+  gradient_accumulation_steps: 4   # effective batch = 16 x 4 = 64
   num_train_epochs: 3
   learning_rate: 2.0e-4
   lr_scheduler_type: "cosine"
