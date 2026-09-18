@@ -198,7 +198,9 @@ def test_render_prompt_disables_thinking():
 
 
 def test_messages_use_shared_system_prompt():
-    for msgs in (cc.humaneval_messages("x"), cc.mbpp_messages("t", "assert f()")):
+    for msgs in (cc.humaneval_messages("x"), cc.mbpp_messages("t", "assert f()", "f")):
         assert msgs[0] == {"role": "system", "content": cc.SYSTEM_PROMPT}
         assert msgs[1]["role"] == "user"
-    assert "assert f()" in cc.mbpp_messages("t", "assert f()")[1]["content"]
+    content = cc.mbpp_messages("t", "assert f()", "Find_Min_Length")[1]["content"]
+    assert "assert f()" in content
+    assert content.rstrip().endswith("The function must be named `Find_Min_Length`.")

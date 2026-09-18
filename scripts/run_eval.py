@@ -58,7 +58,7 @@ def load_tasks(dataset: str, subset: list[str] | None = None) -> list[dict]:
             tasks.append({
                 "task_id": task_id,
                 "entry_point": row["entry_point"],
-                "messages": cc.mbpp_messages(text, first_test),
+                "messages": cc.mbpp_messages(text, first_test, row["entry_point"]),
             })
     else:
         raise ValueError(f"Unknown dataset: {dataset}")

@@ -73,7 +73,7 @@ def load_pool(num_problems: int = 0, seed: int = 42) -> list[dict]:
                 "test_list": list(row["test_list"]),
                 "setup_code": setup,
                 "entry_point": entry,
-                "messages": cc.mbpp_messages(row["text"], row["test_list"][0]),
+                "messages": cc.mbpp_messages(row["text"], row["test_list"][0], entry),
             })
     tasks.sort(key=lambda t: t["task_id"])
     random.Random(seed).shuffle(tasks)

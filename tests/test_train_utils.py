@@ -39,7 +39,7 @@ def test_prompt_matches_inference_prompt_with_real_tokenizer():
     except Exception as exc:  # offline CI without the hub cache
         pytest.skip(f"tokenizer unavailable: {exc}")
     import codegen_common as cc
-    msgs = cc.mbpp_messages("Write f.", "assert f(1) == 1")
+    msgs = cc.mbpp_messages("Write f.", "assert f(1) == 1", "f")
     prompt = cc.render_prompt(tok, msgs)
     assert prompt.endswith("<|im_start|>assistant\n" + tu.NON_THINKING_SUFFIX)
     assert tu.check_dpo_format([{"prompt": prompt, "chosen": "a", "rejected": "b"}]) == []

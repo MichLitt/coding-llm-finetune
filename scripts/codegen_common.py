@@ -81,15 +81,18 @@ def humaneval_messages(prompt: str) -> list[dict]:
     ]
 
 
-def mbpp_messages(text: str, first_test: str) -> list[dict]:
+def mbpp_messages(text: str, first_test: str, entry_point: str) -> list[dict]:
     """Chat messages for an MBPP-style task.
 
-    The first assert is included so the model learns the required function name
-    and signature (standard MBPP practice).
+    The first assert is included so the model sees the signature, and the required
+    function name is stated explicitly: MBPP uses irregular names (``Find_Min_Length``,
+    ``substract_elements``) that the model otherwise "fixes", which fails the tests for
+    reasons unrelated to coding ability (14/378 MBPP+ replies in the first baseline).
     """
     body = (
         f"{_MBPP_INSTRUCTION}\n\n{text.strip()}\n\n"
-        f"Your code should pass this test:\n{first_test.strip()}"
+        f"Your code should pass this test:\n{first_test.strip()}\n\n"
+        f"The function must be named `{entry_point}`."
     )
     return [
         {"role": "system", "content": SYSTEM_PROMPT},
