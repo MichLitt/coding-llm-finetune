@@ -1,7 +1,7 @@
 [project]
 name = "coding-llm"
 version = "0.3.0"
-description = "CodeTune v3: clean SFT+DPO post-training pipeline for Qwen3.5-4B-Instruct"
+description = "CodeTune v3.1: SFT+DPO post-training pipeline for Qwen3.5-4B with a leak-free evaluation harness"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -28,8 +28,12 @@ train = [
     "bitsandbytes>=0.43.0",
     "safetensors>=0.4.0",
 ]
+eval = [
+    "evalplus>=0.3.1",
+]
 dev = [
     "pytest>=8.0",
+    "jinja2>=3.1",
     "jupyter>=1.0.0",
     "ipywidgets>=8.1.0",
 ]

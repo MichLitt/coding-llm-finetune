@@ -97,7 +97,7 @@ def main(data_dir: str, num_samples: int, num_val_samples: int):
         all_train   = all_train[num_val_samples:]
 
     print(f"\n{'='*60}")
-    print("Pipeline Validation — Qwen3.5-4B-Instruct (4-bit)")
+    print("Pipeline Validation — Qwen3.5-4B (4-bit)")
     print(f"{'='*60}")
     print(f"Train samples : {len(all_train)}")
     print(f"Val   samples : {len(val_samples)}")

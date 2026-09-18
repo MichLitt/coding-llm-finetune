@@ -1,6 +1,6 @@
 # DPO training configuration
 # Local RTX 5070 8GB: load_in_4bit=true (base model loaded in 4-bit, adapter in bf16)
-# Run: python scripts/dpo_train.py --sft-checkpoint results/sft_checkpoints/sft_targeted/final
+# Run: python scripts/dpo_train.py --sft-checkpoint results/sft_checkpoints/sft_generic_cons/final
 
 model:
   max_seq_length: 2048
@@ -33,7 +33,7 @@ training:
   per_device_train_batch_size: 1    # DPO needs chosen+rejected simultaneously
   gradient_accumulation_steps: 16   # effective batch = 16
   num_train_epochs: 1               # 1 epoch prevents reward hacking on small dataset
-  learning_rate: 5.0e-5
+  learning_rate: 5.0e-6            # conservative first run; raise to 2e-5 only if reward margins barely move
   lr_scheduler_type: "cosine"
   warmup_ratio: 0.1
   bf16: true
@@ -43,7 +43,7 @@ training:
 
 checkpointing:
   output_dir: "results/dpo_checkpoints"
-  logging_steps: 5
+  logging_steps: 2
   eval_steps: 20
   save_steps: 50
   save_total_limit: 2

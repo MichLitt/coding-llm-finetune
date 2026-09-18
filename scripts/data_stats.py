@@ -4,7 +4,6 @@ Reads sft_train.jsonl / sft_val.jsonl and prints:
   - Sample counts per source
   - Token length distributions (p50 / p95 / p99)
   - Deduplication rate (via filename)
-  - Targeted data coverage per pattern
   - Sample previews (3 per source)
 
 Usage:
@@ -112,14 +111,6 @@ def main(data_dir: str, tokenizer_name: str, preview_n: int):
     for src, cnt in source_counts.most_common():
         _print_bar(src, cnt, total)
 
-    # ---- Targeted pattern coverage ----
-    targeted = [s for s in all_samples if s.get("source") == "targeted"]
-    if targeted:
-        pattern_counts = Counter(s.get("pattern_key", "unknown") for s in targeted)
-        print(f"\nTargeted failure coverage ({len(targeted)} samples):")
-        for pk, cnt in sorted(pattern_counts.items()):
-            _print_bar(pk, cnt, len(targeted))
-
     # ---- Token stats ----
     print(f"\nLoading tokenizer ({tokenizer_name}) for token stats …")
     try:
@@ -164,7 +155,6 @@ def main(data_dir: str, tokenizer_name: str, preview_n: int):
         "train": len(train_samples),
         "val":   len(val_samples),
         "by_source": dict(source_counts),
-        "targeted_by_pattern": dict(Counter(s.get("pattern_key", "") for s in targeted)),
     }
     (stats_dir / "sft_stats.json").write_text(
         json.dumps(stats_out, indent=2, ensure_ascii=False), encoding="utf-8"

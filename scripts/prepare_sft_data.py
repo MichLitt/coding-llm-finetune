@@ -6,7 +6,7 @@ MinHash LSH, and writes train/val JSONL files.
 
 Usage:
     uv run python scripts/prepare_sft_data.py
-    uv run python scripts/prepare_sft_data.py --max-samples 5000 --output-dir data/processed
+    uv run python scripts/prepare_sft_data.py --magicoder-n 2000 --evol-n 1500 --output-dir data/processed
 """
 
 from __future__ import annotations
@@ -135,8 +135,8 @@ _HE_FUNC_NAMES: set[str] = {
     "choose_num", "rounded_avg", "unique_digits", "by_length", "even_odd_count",
     "int_to_mini_roman", "right_angle_triangle", "find_max", "do_algebra",
     "string_to_md5", "generate_integers",
-    # targeted failure-pattern functions (including names excluded from
-    # instruction-side matching because they are generic as free text)
+    # HumanEval entry points that look generic as free text but are still exact
+    # benchmark function names when they appear as ``def name(`` in code
     "same_chars", "fib", "minSubArraySum", "intersection",
     "prod_signs", "tri", "file_name_check", "get_max_triples",
 }
@@ -180,7 +180,7 @@ def to_messages(instruction: str, output: str, source: str, task_id: str | None 
 # ---- per-dataset loaders -----------------------------------------------------
 
 def _iter_magicoder(tokenizer, min_p: int, max_p: int, min_r: int, max_r: int) -> Iterator[dict]:
-    ds = load_dataset("ise-uiuc/Magicoder-OSS-Instruct-75K", split="train", trust_remote_code=True)
+    ds = load_dataset("ise-uiuc/Magicoder-OSS-Instruct-75K", split="train")
     for row in tqdm(ds, desc="Magicoder", unit="row"):
         instruction = row.get("problem") or row.get("instruction") or ""
         output = row.get("solution") or row.get("output") or ""
@@ -201,7 +201,7 @@ def _iter_magicoder(tokenizer, min_p: int, max_p: int, min_r: int, max_r: int) -
 
 
 def _iter_evol(tokenizer, min_p: int, max_p: int, min_r: int, max_r: int) -> Iterator[dict]:
-    ds = load_dataset("theblackcat102/evol-codealpaca-v1", split="train", trust_remote_code=True)
+    ds = load_dataset("theblackcat102/evol-codealpaca-v1", split="train")
     for row in tqdm(ds, desc="EvolCodeAlpaca", unit="row"):
         instruction = row.get("instruction") or ""
         output = row.get("output") or ""
@@ -228,31 +228,36 @@ def deduplicate(samples: list[dict], threshold: float = 0.85, num_perm: int = 12
     """MinHash LSH deduplication on instruction text."""
     lsh = MinHashLSH(threshold=threshold, num_perm=num_perm)
     unique: list[dict] = []
-    # Targeted samples are never deduplicated (small, curated set)
-    priority = [s for s in samples if s["source"] == "targeted"]
-    general  = [s for s in samples if s["source"] != "targeted"]
-
-    # Insert priority samples first (no dedup among them)
-    for i, s in enumerate(priority):
-        key = f"p_{i}"
+    for i, s in enumerate(tqdm(samples, desc="Deduplicating", unit="sample")):
         mh = compute_minhash(s["messages"][1]["content"])
-        try:
-            lsh.insert(key, mh)
-        except ValueError:
-            pass  # duplicate key (shouldn't happen with enumerated keys)
-        unique.append(s)
-
-    # Dedup general samples against existing set
-    for i, s in enumerate(tqdm(general, desc="Deduplicating", unit="sample")):
-        mh = compute_minhash(s["messages"][1]["content"])
-        results = lsh.query(mh)
-        if results:
+        if lsh.query(mh):
             continue  # near-duplicate found
-        key = f"g_{i}"
-        lsh.insert(key, mh)
+        lsh.insert(f"s_{i}", mh)
         unique.append(s)
-
     return unique
+
+
+def rendered_length(tokenizer, sample: dict) -> int:
+    """Token length of the full chat-template text the trainer will see (system + user + reply)."""
+    text = tokenizer.apply_chat_template(sample["messages"], tokenize=False, add_generation_prompt=False)
+    return len(tokenizer(text).input_ids)
+
+
+def cap_per_source(samples: list[dict], caps: dict[str, int], seed: int = 42) -> list[dict]:
+    """Randomly keep at most ``caps[source]`` samples per source (0/absent = keep all)."""
+    import random
+
+    rng = random.Random(seed)
+    by_source: dict[str, list[dict]] = {}
+    for sample in samples:
+        by_source.setdefault(sample["source"], []).append(sample)
+    kept: list[dict] = []
+    for source, rows in sorted(by_source.items()):
+        cap = caps.get(source, 0)
+        if cap and len(rows) > cap:
+            rows = rng.sample(rows, cap)
+        kept.extend(rows)
+    return kept
 
 
 # ---- main --------------------------------------------------------------------
@@ -260,23 +265,28 @@ def deduplicate(samples: list[dict], threshold: float = 0.85, num_perm: int = 12
 @click.command()
 @click.option("--output-dir", default="data/processed", show_default=True,
               help="Directory to write train/val JSONL files.")
-@click.option("--max-samples", default=0, type=int,
-              help="Cap total samples (0 = no cap, for quick testing use e.g. 500).")
+@click.option("--magicoder-n", default=2000, show_default=True, type=int,
+              help="Samples kept from Magicoder after filtering/dedup (0 = all).")
+@click.option("--evol-n", default=1500, show_default=True, type=int,
+              help="Samples kept from Evol-CodeAlpaca after filtering/dedup (0 = all).")
+@click.option("--max-total-tokens", default=1024, show_default=True, type=int,
+              help="Drop samples whose rendered chat text exceeds this (must equal max_seq_length; 0 = off).")
 @click.option("--val-ratio", default=0.05, show_default=True,
               help="Fraction of data held out as validation set.")
 @click.option("--sources", default="magicoder,evol",
               show_default=True, help="Comma-separated list of data sources to include.")
 @click.option("--seed", default=42, show_default=True)
-def main(output_dir: str, max_samples: int, val_ratio: float, sources: str, seed: int):
+def main(output_dir: str, magicoder_n: int, evol_n: int, max_total_tokens: int, val_ratio: float,
+         sources: str, seed: int):
     import random
     random.seed(seed)
 
     out = ROOT / output_dir
     out.mkdir(parents=True, exist_ok=True)
 
-    print("Loading tokenizer (Qwen3.5-4B-Instruct) …")
+    print("Loading tokenizer (Qwen3.5-4B) …")
     tokenizer = AutoTokenizer.from_pretrained(
-        "unsloth/Qwen3.5-4B", trust_remote_code=True
+        "unsloth/Qwen3.5-4B"
     )
 
     # Token length filters
@@ -292,13 +302,6 @@ def main(output_dir: str, max_samples: int, val_ratio: float, sources: str, seed
     if "evol" in source_list:
         all_samples.extend(_iter_evol(tokenizer, MIN_P, MAX_P, MIN_R, MAX_R))
 
-    # Load targeted data if present
-    targeted_path = ROOT / "data/processed/targeted/targeted_filtered.jsonl"
-    if targeted_path.exists():
-        targeted = [json.loads(l) for l in targeted_path.read_text(encoding="utf-8").splitlines() if l.strip()]
-        print(f"Loaded {len(targeted)} targeted samples from {targeted_path}")
-        all_samples.extend(targeted)
-
     print(f"\nBefore dedup: {len(all_samples)} samples")
     source_counts = Counter(s["source"] for s in all_samples)
     for src, cnt in sorted(source_counts.items()):
@@ -306,6 +309,7 @@ def main(output_dir: str, max_samples: int, val_ratio: float, sources: str, seed
 
     # Deduplication
     all_samples = deduplicate(all_samples)
+    n_after_dedup = len(all_samples)
     print(f"After dedup:  {len(all_samples)} samples")
 
     # HumanEval contamination filter
@@ -315,15 +319,33 @@ def main(output_dir: str, max_samples: int, val_ratio: float, sources: str, seed
     if n_contaminated:
         print(f"Removed {n_contaminated} samples with HumanEval function definitions (contamination filter)")
 
-    # Optional cap
-    if max_samples and len(all_samples) > max_samples:
-        # Always keep targeted samples
-        priority = [s for s in all_samples if s["source"] == "targeted"]
-        general  = [s for s in all_samples if s["source"] != "targeted"]
-        random.shuffle(general)
-        cap_general = max(0, max_samples - len(priority))
-        all_samples = priority + general[:cap_general]
-        print(f"After cap ({max_samples}): {len(all_samples)} samples")
+    # Drop anything the pre-training gate would flag (same checks as check_contamination.py),
+    # so the prepared data passes the gate by construction. Done before the cap so the
+    # per-source counts are still reached after removal.
+    from check_contamination import find_contaminated, load_benchmarks
+
+    statement_index, solution_index = load_benchmarks()
+    if statement_index is None or solution_index is None:
+        print("WARNING: benchmark data unavailable; n-gram contamination filter incomplete.")
+    flagged = find_contaminated(all_samples, statement_index, solution_index)
+    if flagged:
+        reasons = Counter(check for hits in flagged.values() for check, _ in hits)
+        print(f"Removed {len(flagged)} samples flagged by contamination checks: {dict(reasons)}")
+        all_samples = [s for i, s in enumerate(all_samples) if i not in flagged]
+
+    # Length filter on the *rendered* text: samples longer than max_seq_length would be
+    # truncated mid-reply (no EOS) during training.
+    n_before_len = len(all_samples)
+    if max_total_tokens:
+        all_samples = [s for s in tqdm(all_samples, desc="Length filter", unit="sample")
+                       if rendered_length(tokenizer, s) <= max_total_tokens]
+        print(f"Removed {n_before_len - len(all_samples)} samples over {max_total_tokens} rendered tokens")
+    n_after_len = len(all_samples)
+
+    # Per-source cap (keeps the SFT set small and its composition explicit)
+    all_samples = cap_per_source(all_samples, {"magicoder": magicoder_n, "evol": evol_n}, seed)
+    print(f"After per-source cap: {len(all_samples)} samples "
+          f"{dict(Counter(s['source'] for s in all_samples))}")
 
     # Shuffle and split
     random.shuffle(all_samples)
@@ -347,6 +369,19 @@ def main(output_dir: str, max_samples: int, val_ratio: float, sources: str, seed
         "\n".join(_safe_dumps(s) for s in val_samples) + "\n",
         encoding="utf-8",
     )
+
+    manifest = {
+        "seed": seed, "sources": source_list, "magicoder_n": magicoder_n, "evol_n": evol_n,
+        "max_total_tokens": max_total_tokens, "val_ratio": val_ratio,
+        "counts": {
+            "loaded": dict(source_counts), "after_dedup": n_after_dedup,
+            "removed_by_def_filter": n_contaminated, "removed_by_contamination_checks": len(flagged),
+            "removed_by_length_filter": n_before_len - n_after_len,
+            "train": len(train_samples), "val": len(val_samples),
+            "train_by_source": dict(Counter(s["source"] for s in train_samples)),
+        },
+    }
+    (out / "sft_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
     print(f"\nWrote {len(train_samples):,} train samples → {train_path}")
     print(f"Wrote {len(val_samples):,}   val samples → {val_path}")

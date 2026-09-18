@@ -4,7 +4,7 @@ Loads an SFT adapter or full checkpoint, attaches a fresh LoRA adapter, trains
 with TRL DPOTrainer, and saves the resulting adapter.
 
 Usage:
-    python scripts/dpo_train.py --sft-checkpoint results/sft_checkpoints/sft_targeted/final
+    python scripts/dpo_train.py --sft-checkpoint results/sft_checkpoints/sft_generic_cons/final
     python scripts/dpo_train.py --config-path configs/dpo_config_colab_a100.yaml --sft-checkpoint ...
 """
 
@@ -18,6 +18,10 @@ from pathlib import Path
 import click
 import yaml
 from dotenv import load_dotenv
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+from train_utils import check_dpo_format, resolve_output_dir, summarize_dynamics  # noqa: E402
 
 load_dotenv()
 
@@ -69,7 +73,8 @@ def _build_dpo_config(config_cls, kwargs: dict):
 
 @click.command()
 @click.option("--sft-checkpoint", required=True,
-              help="Path to SFT final adapter directory.")
+              help="Path to the SFT final adapter directory, or 'base' to start DPO from the "
+                   "untuned base model (use when SFT did not help).")
 @click.option("--config-path", default=str(DEFAULT_DPO_CFG_PATH), show_default=True,
               help="Path to DPO YAML config.")
 @click.option("--beta", default=None, type=float,
@@ -102,11 +107,12 @@ def main(sft_checkpoint: str, config_path: str, beta: float | None, exp_id: str)
     dtype = _resolve_torch_dtype(torch, model_cfg.get("dtype", "bfloat16"))
     effective_beta = beta if beta is not None else dpo_cfg.get("beta", 0.1)
     load_in_4bit = model_cfg.get("load_in_4bit", True)
-    out_dir = ROOT / ckpt_cfg.get("output_dir", "results/dpo_checkpoints") / exp_id
+    out_dir = resolve_output_dir(ROOT, ckpt_cfg.get("output_dir", "results/dpo_checkpoints"), exp_id)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    from_base = sft_checkpoint == "base"
     ckpt_path = Path(sft_checkpoint)
-    if not ckpt_path.exists():
+    if not from_base and not ckpt_path.exists():
         print(f"ERROR: SFT checkpoint not found: {ckpt_path}")
         sys.exit(1)
 
@@ -125,18 +131,20 @@ def main(sft_checkpoint: str, config_path: str, beta: float | None, exp_id: str)
     val_raw = _load_jsonl(ROOT / data_cfg["val_file"])
     print(f"DPO train pairs: {len(train_raw):,}  val pairs: {len(val_raw):,}")
 
-    print(f"\nLoading SFT model from {ckpt_path} ...")
-    is_adapter_only = not (ckpt_path / "config.json").exists()
-    if is_adapter_only:
-        print(f"Detected LoRA adapter. Loading base model {base_model_name} first.")
+    print(f"\nLoading starting model ({'base' if from_base else ckpt_path}) ...")
+    is_adapter_only = not from_base and not (ckpt_path / "config.json").exists()
+    if from_base or is_adapter_only:
+        if is_adapter_only:
+            print(f"Detected LoRA adapter. Loading base model {base_model_name} first.")
         model, tokenizer = FastLanguageModel.from_pretrained(
             model_name=base_model_name,
             max_seq_length=model_cfg.get("max_seq_length", 2048),
             load_in_4bit=load_in_4bit,
             dtype=dtype,
         )
-        model = PeftModel.from_pretrained(model, str(ckpt_path))
-        model = model.merge_and_unload()
+        if is_adapter_only:
+            model = PeftModel.from_pretrained(model, str(ckpt_path))
+            model = model.merge_and_unload()
     else:
         model, tokenizer = FastLanguageModel.from_pretrained(
             model_name=str(ckpt_path),
@@ -163,8 +171,16 @@ def main(sft_checkpoint: str, config_path: str, beta: float | None, exp_id: str)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Trainable DPO parameters: {n_params / 1e6:.2f}M")
 
-    train_ds = Dataset.from_list(train_raw)
-    val_ds = Dataset.from_list(val_raw)
+    problems = check_dpo_format(train_raw) + check_dpo_format(val_raw)
+    if problems:
+        print("ERROR: DPO data format check failed (regenerate with scripts/generate_dpo_pairs.py):")
+        for problem in problems:
+            print(f"  - {problem}")
+        sys.exit(1)
+    print("DPO format check passed (rendered non-thinking prompts, bare replies).")
+    columns = ("prompt", "chosen", "rejected")
+    train_ds = Dataset.from_list([{k: row[k] for k in columns} for row in train_raw])
+    val_ds = Dataset.from_list([{k: row[k] for k in columns} for row in val_raw])
 
     dpo_config_kwargs = {
         "output_dir": str(out_dir),
@@ -210,15 +226,23 @@ def main(sft_checkpoint: str, config_path: str, beta: float | None, exp_id: str)
     model.save_pretrained(str(final_dir))
     tokenizer.save_pretrained(str(final_dir))
 
+    dynamics = summarize_dynamics(trainer.state.log_history)
+    print("Training dynamics:", json.dumps(dynamics, indent=2))
+    if dynamics.get("chosen_logp_decreased"):
+        print("WARNING: logps/chosen decreased during training (likelihood displacement). "
+              "Report it; consider a larger beta or a lower learning rate.")
+
     meta = {
         "exp_id": exp_id,
         "config_path": str(cfg_path),
-        "sft_checkpoint": str(sft_checkpoint),
+        "sft_checkpoint": "base" if from_base else str(ckpt_path.resolve()),
         "base_model": base_model_name,
         "beta": effective_beta,
         "lora_r": r,
         "train_pairs": len(train_raw),
         "val_pairs": len(val_raw),
+        "learning_rate": train_cfg.get("learning_rate"),
+        "dynamics": dynamics,
     }
     (final_dir / "experiment_meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 

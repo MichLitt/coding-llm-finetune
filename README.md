@@ -1,38 +1,37 @@
-# CodeTune v3: SFT + DPO Post-Training Pipeline
+# CodeTune v3.1: SFT + DPO Post-Training Pipeline
 
-A supervised fine-tuning (SFT) and direct preference optimization (DPO) pipeline for code generation, targeting known failure patterns in a real-world coding agent.
+A supervised fine-tuning (SFT) and direct preference optimization (DPO) pipeline for code generation on
+Qwen3.5-4B, built around a **leak-free, failure-classifying evaluation harness** and **execution-feedback preference pairs**.
 
-**Base model**: Qwen3.5-4B-Instruct
-**Hardware**: Local RTX 5070 8GB (full training + evaluation)
-**Key design**: No benchmark data in training set — HumanEval is held out as a clean evaluation target
+**Base model**: `Qwen/Qwen3.5-4B` (the post-trained release; loaded as `unsloth/Qwen3.5-4B`. There is no "-Instruct" variant)
+**Hardware**: Colab A100/H100 for all GPU work; a CPU-only Mac for data prep, tests and analysis
+**Key design**: no benchmark data in any training set; one prompt, one extraction routine and one failure taxonomy shared by evaluation and DPO-pair generation
+
+Plan: [report/CodeTune_v3.1_Execution_Plan.md](report/CodeTune_v3.1_Execution_Plan.md) (supersedes the targeted-data parts of [CodeTune_v3_Project_Plan.md](report/CodeTune_v3_Project_Plan.md)).
 
 ---
 
 ## Results
 
-> v3 training in progress. See [report/CodeTune_v3_Project_Plan.md](report/CodeTune_v3_Project_Plan.md) for the current plan.
+> No experiment results yet. Phase 0 (harness, data, tests) is implemented; baseline, SFT and DPO runs are pending (Colab).
 
-| Model | HumanEval pass@1 | Targeted (8 cases) | vs Baseline |
-|-------|------------------|--------------------|-------------|
-| Qwen3.5-4B-Instruct (baseline) | TBD | TBD | — |
-| sft_generic | TBD | TBD | TBD |
-| sft_targeted | TBD | TBD | TBD |
-| dpo_v1 | TBD | TBD | TBD |
-
-The 8 targeted failure cases are real logic errors from a separate Coder Agent project (HumanEval/54, 55, 107, 108, 110, 128, 141, 147).
+| Model | HumanEval pass@1 | HumanEval+ | MBPP+ | vs baseline (paired 95% CI) |
+|-------|------------------|-----------|-------|------------------------------|
+| Qwen3.5-4B (baseline) | TBD | TBD | TBD | — |
+| sft_generic_aggr | TBD | TBD | TBD | TBD |
+| sft_generic_cons | TBD | TBD | TBD | TBD |
+| dpo_b01 / dpo_b03 | TBD | TBD | TBD | TBD |
 
 ---
 
-## v2 → v3 Changes
+## Why v3.1 (history)
 
-v2 had two critical methodology errors that invalidated its results:
-
-1. **HumanEval data leakage**: v2 included all 164 HumanEval canonical solutions in SFT training data, then evaluated on the same problems. The 37.8% → 76.2% improvement was not meaningful.
-2. **Unfair baseline**: v2 used `Qwen3.5-9B` (base, non-instruct) as the baseline, evaluated via chat template — structurally disadvantaged compared to the SFT model.
-
-v3 fixes both: HumanEval is removed from training data entirely, and the baseline is the same `Qwen3.5-4B-Instruct` model evaluated zero-shot.
-
-See [report/archive/](report/archive/) for v2 reports.
+* **v2** trained on all 164 HumanEval canonical solutions and then evaluated on HumanEval, and compared against a base model. Its numbers are not meaningful.
+* **v3** removed the leak but the audit for v3.1 found further problems (see [report/archive/ERRATA.md](report/archive/ERRATA.md) and the plan, section 1):
+  the evaluation executed raw chat output with no code extraction; thinking mode was inconsistent between eval and SFT text;
+  the "targeted" data embedded HumanEval solutions in its generator prompts and targeted failures of a *different* model,
+  and four of the eight targeted task ids pointed at the wrong HumanEval problems; DPO pairs used garbage negatives (temperature up to 1.8).
+* **v3.1** fixes the harness, drops targeted data, and adds failure classification and paired statistics.
 
 ---
 
@@ -41,102 +40,97 @@ See [report/archive/](report/archive/) for v2 reports.
 ```
 .
 ├── configs/
-│   ├── sft_config.yaml          # SFT hyperparameters (LoRA r=32, 4B model)
-│   ├── dpo_config.yaml          # DPO hyperparameters (LoRA r=16, beta=0.1)
-│   └── ablation_matrix.yaml     # SFT experiment variants
+│   ├── sft_config*.yaml / dpo_config*.yaml   # Colab A100/H100 profiles (batch size, precision, checkpoint cadence)
+│   ├── ablation_matrix.yaml                  # SFT experiments: owns r / alpha / lr / epochs
+│   ├── mbpp_plus_task_ids.json               # 378 held-out MBPP+ ids (never used for training data)
+│   └── mbpp_dpo_pool_ids.json                # 592 MBPP tasks eligible for DPO pairs
 ├── scripts/
-│   ├── prepare_sft_data.py      # Download + clean + deduplicate (no HumanEval)
-│   ├── check_contamination.py   # Pre-training benchmark contamination check
-│   ├── generate_targeted_data.py # Targeted failure-pattern data via MiniMax API
-│   ├── data_stats.py            # Dataset statistics
-│   ├── sft_train.py             # SFT training
-│   ├── generate_dpo_pairs.py    # DPO pairs from MBPP (execution-driven)
-│   ├── dpo_train.py             # DPO training
-│   ├── run_humaneval.py         # HumanEval benchmark evaluation
-│   └── run_targeted_eval.py     # Targeted failure case comparison
-├── report/
-│   ├── CodeTune_v3_Project_Plan.md
-│   └── archive/                 # v2 reports (methodology issues documented)
-├── .env.example
-└── pyproject.toml
+│   ├── codegen_common.py        # prompt, code extraction, sandbox execution, failure taxonomy (shared)
+│   ├── model_io.py              # bf16 model/adapter loading + batched generation (unsloth | hf | vllm)
+│   ├── run_eval.py              # HumanEval(+) / MBPP+ evaluation, per-problem status, trust gate
+│   ├── compare_runs.py          # paired bootstrap CI, McNemar, fixed/broken problems (CPU)
+│   ├── prepare_sft_data.py      # Magicoder + Evol-CodeAlpaca, filtered and contamination-checked
+│   ├── check_contamination.py   # pre-training gate (name, n-gram containment vs HumanEval/MBPP+)
+│   ├── sft_train.py / dpo_train.py
+│   ├── generate_dpo_pairs.py    # execution-feedback pairs: hard negatives, length-matched, split by task
+│   ├── train_utils.py, data_stats.py, validate_pipeline.py
+├── tests/                       # offline unit tests (no GPU)
+├── notebooks/colab_train_a100_h100.ipynb   # one stage per Colab session
+└── report/                      # plans, results, archive/ (v2 reports + ERRATA)
 ```
 
 ---
 
-## Setup
+## Setup (local, CPU)
 
 ```bash
-cp .env.example .env
-# Edit .env: MINIMAX_API_KEY, HF_TOKEN, WANDB_API_KEY
-
-uv sync
-uv sync --extra train   # for training dependencies
+cp .env.example .env            # HF_TOKEN, WANDB_API_KEY (optional)
+uv sync --extra dev             # Python 3.12; pytest, jinja2
+uv sync --extra dev --extra eval   # + evalplus (HumanEval+/MBPP+). evalplus only *runs* on Linux (Colab/CI)
+uv run pytest -q
 ```
+
+GPU stages run on Colab; training extras (Unsloth, TRL, PEFT) are installed by the notebook.
 
 ---
 
 ## Pipeline
 
-### Phase 0: Data Preparation
+### Phase 0 — data (local)
 
 ```bash
-# Magicoder + EvolCodeAlpaca only — HumanEval excluded by design
-uv run python scripts/prepare_sft_data.py --sources magicoder,evol
-
-# Generate targeted data for 8 known failure patterns
-uv run python scripts/generate_targeted_data.py
-
-# Verify no benchmark contamination before training
-uv run python scripts/check_contamination.py
+uv run python scripts/prepare_sft_data.py --magicoder-n 2000 --evol-n 1500
+uv run python scripts/check_contamination.py      # hard gate; must print PASSED
 ```
 
-Final dataset: ~3,700 samples (2K magicoder + 1.5K evol + 200 targeted)
+Upload `data/processed/sft_*.jsonl` to Drive (`DATA_SOURCE_DIR` in the notebook).
 
-### Phase 1: SFT Training (Local RTX 5070)
+### Phase 1 — baseline (Colab session 1)
+
+`run_eval.py` prints a **trust gate**: token-limit hits ≤ 1%, no-code + syntax errors ≤ 2%, our executor agrees with evalplus.
+Do not compare any numbers until it passes.
 
 ```bash
-uv run python scripts/sft_train.py --exp-id sft_targeted
-uv run python scripts/sft_train.py --exp-id sft_generic   # ablation
+python scripts/run_eval.py --model unsloth/Qwen3.5-4B --label base --dataset humaneval
+python scripts/run_eval.py --model unsloth/Qwen3.5-4B --label base --dataset mbpp
 ```
 
-Key config: LoRA r=32, alpha=64, 3 epochs, lr=2e-4, 4-bit quantization
-
-### Phase 2: DPO Training (Local)
+### Phase 2 — SFT (Colab session 2)
 
 ```bash
-# Generate pairs from MBPP (not HumanEval — keeping eval set clean)
-uv run python scripts/generate_dpo_pairs.py \
-    --sft-checkpoint results/sft_targeted/final \
-    --num-problems 250
-
-uv run python scripts/dpo_train.py \
-    --sft-checkpoint results/sft_targeted/final \
-    --exp-id dpo_v1
+python scripts/sft_train.py --config-path configs/sft_config_colab_a100.yaml --exp-id sft_generic_aggr --resume-from auto
+python scripts/sft_train.py --config-path configs/sft_config_colab_a100.yaml --exp-id sft_generic_cons --resume-from auto
 ```
 
-Key config: LoRA r=16, beta=0.1, execution-driven pairs (MBPP unit tests)
+Set `CODETUNE_OUTPUT_ROOT` to a Drive folder so checkpoints survive disconnects (the notebook does this).
 
-### Phase 3: Evaluation
+### Phase 3 — DPO (Colab session 3)
 
 ```bash
-# HumanEval (clean — not in training data)
-uv run python scripts/run_humaneval.py --model results/sft_targeted/final --label sft_targeted
+python scripts/generate_dpo_pairs.py --sft-checkpoint base          # or an SFT adapter dir
+python scripts/dpo_train.py --config-path configs/dpo_config_colab_a100.yaml --sft-checkpoint base --exp-id dpo_b01 --beta 0.1
+python scripts/dpo_train.py --config-path configs/dpo_config_colab_a100.yaml --sft-checkpoint base --exp-id dpo_b03 --beta 0.3
+```
 
-# Targeted failure case comparison
-uv run python scripts/run_targeted_eval.py
+`generate_dpo_pairs.py` prints a stage-3 gate (≥ 300 pairs, median length ratio 0.8–1.25, wrong-answer ≥ 50% of rejected).
+
+### Phase 4 — analysis (local)
+
+```bash
+uv run python scripts/compare_runs.py --labels base,sft_generic_cons,dpo_b01,dpo_b03 --baseline base
 ```
 
 ---
 
 ## Key Design Decisions
 
-**Why remove HumanEval from training data?** v2 included HumanEval canonical solutions in SFT training and then evaluated on the same problems — direct data leakage. v3 keeps HumanEval as a held-out clean benchmark.
-
-**Why MBPP for DPO pairs?** MBPP prompts have unit tests for execution-driven pair construction, and are independent from the HumanEval evaluation set. This keeps both the DPO training signal and the final evaluation clean.
-
-**Why 4B instead of 9B?** RTX 5070 8GB can run 4-bit LoRA training for 4B (~5GB VRAM), making full local iteration possible — no Colab dependency. Faster iteration enables the 500+ DPO pairs that v2 never achieved.
-
-**Why Qwen3.5-4B-Instruct as baseline?** Comparing an instruction-tuned SFT model against a base model via chat template (as v2 did) is unfair — the improvement reflects instruction following, not code ability. v3 uses the same instruct model as a zero-shot baseline.
+* **One extraction path.** `codegen_common.extract_code` strips think blocks, picks the fenced block that defines the entry point,
+  and drops demo calls / `__main__` blocks. Verified to reproduce 164/164 on HumanEval reference solutions (body-only and full-definition replies).
+* **Non-thinking mode everywhere.** `render_prompt` always passes `enable_thinking=False`; the SFT training text extends exactly that prompt (unit-tested against the real tokenizer).
+* **Failures are classified**: `pass, no_code, truncated, syntax_error, missing_entry_point, runtime_error, wrong_answer, timeout`.
+* **DPO pairs are hard-negative only** (`wrong_answer` / `runtime_error`), sampled at T ∈ [0.2, 1.0], length-matched (0.67–1.5), rendered with the inference prompt, split by task id.
+* **Held-out sets**: HumanEval(+) and MBPP+ never touch training data; DPO pairs come from MBPP minus every MBPP+ id.
+* **A DPO adapter trained on an SFT adapter stores only the DPO delta**; `model_io.adapter_chain` re-applies the SFT adapter first (recorded in `experiment_meta.json`).
 
 ---
 
@@ -144,26 +138,22 @@ uv run python scripts/run_targeted_eval.py
 
 | Variable | Purpose |
 |----------|---------|
-| `MINIMAX_API_KEY` | MiniMax API for targeted data generation |
-| `MINIMAX_BASE_URL` | MiniMax endpoint (OpenAI-compatible) |
 | `HF_TOKEN` | HuggingFace Hub |
-| `WANDB_API_KEY` | Training monitoring |
+| `WANDB_API_KEY` | Training monitoring (wandb is disabled automatically when unset) |
+| `CODETUNE_OUTPUT_ROOT` | Root for checkpoints/eval outputs (e.g. a Drive folder) |
 
 ---
 
-## Current Status (2026-04-07)
+## Current Status (2026-09-18)
 
-- [x] v2 methodology issues identified and documented
-- [x] v3 plan written
-- [x] Fix `prepare_sft_data.py` (HumanEval source removed)
-- [x] Write `check_contamination.py` (Jaccard n-gram + function name matching)
-- [x] Update configs for 4B model (sft_config.yaml, dpo_config.yaml, ablation_matrix.yaml)
-- [x] Update `generate_dpo_pairs.py` to use MBPP (execution-driven pairs)
-- [x] Update `sft_train.py` with `train_on_responses_only`
-- [x] Update `dpo_train.py` with 4-bit + adapter detection
-- [x] Update `validate_pipeline.py` to use Qwen3.5-4B-Instruct
-- [ ] Generate SFT data (Phase 0)
-- [ ] Run SFT training experiments (Phase 1)
-- [ ] Generate MBPP DPO pairs (Phase 2)
-- [ ] Run DPO training (Phase 2)
-- [ ] Run HumanEval + targeted evaluation (Phase 3)
+- [x] v3 audit: evaluation, thinking mode, targeted-data leak, task-id errors, DPO pair quality
+- [x] Shared harness (`codegen_common`, `run_eval`, `model_io`) with offline tests
+- [x] Execution-feedback DPO pair generation rewritten; MBPP+ held out
+- [x] SFT matrix / hyper-parameter resolution fixed; checkpoint cadence and Drive output
+- [x] Contamination gate extended (n-gram containment vs HumanEval and MBPP+) and wired into data prep
+- [x] Colab notebook rewritten (eval cells, resume, run manifest)
+- [ ] Push branch, upload data to Drive (manual)
+- [ ] Baseline evaluation + trust gate (Colab)
+- [ ] SFT runs and evaluation (Colab)
+- [ ] Preference pairs, DPO, evaluation (Colab)
+- [ ] Paired analysis and report

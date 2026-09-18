@@ -1,3 +1,5 @@
+> **⚠️ 已被 [CodeTune v3.1 执行计划](CodeTune_v3.1_Execution_Plan.md) 取代（2026-09-18）。** 审计发现本计划中的评测方式、thinking 模式、targeted 数据（3.2 / 5.2 节，含 HumanEval 题解泄露和 4 个错误的 task_id）和 DPO 偏好对构造存在会使结果作废的问题；`Qwen3.5-4B-Instruct` 也并不存在（实际模型是 `Qwen/Qwen3.5-4B`）。本文件仅作历史记录，请勿按本文执行。
+
 # CodeTune v3：代码生成 SFT + DPO Pipeline 计划
 
 > **目标**：在 Qwen3.5-4B-Instruct 上完成 SFT → DPO 完整 post-training pipeline，针对 Coder Agent 的真实 failure patterns 构造 targeted 训练数据，用无污染基准量化效果。

@@ -1,257 +1,299 @@
-"""Generate DPO preference pairs via MBPP execution-driven scoring.
+"""Generate DPO preference pairs from execution feedback on MBPP.
 
-Prompt source  : MBPP test split (374 problems with built-in unit tests)
-                 HumanEval is NOT used — it is held out as the evaluation benchmark
-Scoring method : Unit test execution (pass = chosen, fail = rejected)
-                 No LLM judge — avoids judge bias, directly optimizes eval metric
+Pool          : MBPP (all 4 splits, 974 tasks) MINUS every MBPP+ task id (kept as a
+                held-out second benchmark) and minus tasks whose reference solution
+                fails its own tests -> configs/mbpp_dpo_pool_ids.json (592 tasks).
+                HumanEval is never touched.
+Candidates    : N samples per task at temperatures in [0.2, 1.0] (no garbage
+                high-temperature samples), non-thinking prompt, 1024 new tokens.
+Judging       : the shared extraction + sandbox in codegen_common (same code path as
+                evaluation): pass / wrong_answer / runtime_error / format failures.
+chosen        : a candidate that PASSES and finished cleanly.
+rejected      : a HARD negative only - parses, defines the function, runs, but is
+                wrong (wrong_answer / runtime_error). Truncated, unparsable, no-code
+                and timeout candidates are never used as negatives, otherwise DPO
+                mostly learns format/length instead of correctness.
+Length control: pairs whose rejected/chosen token ratio falls outside
+                [--min-length-ratio, --max-length-ratio] are dropped.
+Format        : ``prompt`` is the chat-template-rendered generation prompt (identical
+                to the one used at inference, non-thinking), ``chosen``/``rejected``
+                are the raw assistant replies.
+Split         : train/val are split by task_id.
 
-Pair construction:
-  - For each MBPP problem, generate N candidates at mixed temperatures
-  - Run MBPP assert-based unit tests on each candidate
-  - Same problem must have ≥1 pass and ≥1 fail to yield a valid pair
-  - chosen  = shortest passing candidate
-  - rejected = random failing candidate
-
-Target: 500+ valid pairs from ~250 MBPP problems (40-60% yield expected)
-
-Usage:
-    uv run python scripts/generate_dpo_pairs.py \\
-        --sft-checkpoint results/sft_checkpoints/sft_targeted/final
-    uv run python scripts/generate_dpo_pairs.py \\
-        --sft-checkpoint <path> --num-problems 300 --n-candidates 8
+Usage (GPU):
+    python scripts/generate_dpo_pairs.py --sft-checkpoint base
+    python scripts/generate_dpo_pairs.py --sft-checkpoint results/sft_checkpoints/sft_x/final
 """
 
 from __future__ import annotations
 
 import json
+import math
 import random
-import subprocess
 import sys
-import tempfile
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import click
-from tqdm import tqdm
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+import codegen_common as cc  # noqa: E402
 
 ROOT = Path(__file__).parent.parent
-
-SYSTEM_PROMPT = (
-    "You are an expert Python programmer. Write clean, efficient, and correct code. "
-    "Always handle edge cases and include brief comments for complex logic."
-)
-
-TARGETED_TASK_IDS = [
-    "HumanEval/54", "HumanEval/55", "HumanEval/107", "HumanEval/108",
-    "HumanEval/110", "HumanEval/128", "HumanEval/141", "HumanEval/147",
-]
+POOL_IDS_PATH = ROOT / "configs/mbpp_dpo_pool_ids.json"
+MBPP_PLUS_IDS_PATH = ROOT / "configs/mbpp_plus_task_ids.json"
 
 
 # ---------------------------------------------------------------------------
-# Execution-based scoring
+# Pool
 # ---------------------------------------------------------------------------
 
-def _run_tests(code: str, test_list: list[str], setup_code: str, timeout: int) -> bool:
-    """Execute candidate code + MBPP assert tests. Returns True if all pass."""
-    full_code = ""
-    if setup_code:
-        full_code += setup_code.strip() + "\n\n"
-    full_code += code.strip() + "\n\n"
-    full_code += "\n".join(test_list) + "\n"
+def load_pool(num_problems: int = 0, seed: int = 42) -> list[dict]:
+    """MBPP tasks eligible for preference-pair generation (never a MBPP+ task)."""
+    from datasets import load_dataset
 
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, encoding="utf-8") as f:
-        f.write(full_code)
-        tmp = f.name
+    pool_ids = set(json.loads(POOL_IDS_PATH.read_text(encoding="utf-8"))["task_ids"])
+    plus_ids = set(json.loads(MBPP_PLUS_IDS_PATH.read_text(encoding="utf-8"))["task_ids"])
+    assert not pool_ids & plus_ids, "DPO pool overlaps MBPP+ (held-out benchmark)"
 
-    try:
-        result = subprocess.run(
-            [sys.executable, tmp],
-            capture_output=True, text=True, timeout=timeout,
-        )
-        return result.returncode == 0
-    except subprocess.TimeoutExpired:
-        return False
-    except Exception:
-        return False
-    finally:
-        Path(tmp).unlink(missing_ok=True)
-
-
-# ---------------------------------------------------------------------------
-# Candidate generation
-# ---------------------------------------------------------------------------
-
-def _generate_candidates(
-    model,
-    tokenizer,
-    problem_text: str,
-    temperatures: list[float],
-    max_new_tokens: int,
-) -> list[str]:
-    """Generate one candidate per temperature."""
-    import torch
-
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": f"Write a Python function to solve the following:\n\n{problem_text}"},
-    ]
-    prompt_text = tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
-    inputs = tokenizer(prompt_text, return_tensors="pt", truncation=True, max_length=768).to(model.device)
-
-    candidates = []
-    for temp in temperatures:
-        with torch.no_grad():
-            out = model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                do_sample=(temp > 0),
-                temperature=temp if temp > 0 else None,
-                top_p=0.95 if temp > 0 else None,
-                pad_token_id=tokenizer.eos_token_id,
-            )
-        generated = tokenizer.decode(
-            out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True
-        ).strip()
-        candidates.append(generated)
-
-    return candidates
+    tasks = []
+    for split in ("train", "validation", "test", "prompt"):
+        for row in load_dataset("google-research-datasets/mbpp", "full", split=split):
+            if row["task_id"] not in pool_ids:
+                continue
+            setup = row.get("test_setup_code") or ""
+            entry = cc.mbpp_entry_point(row["test_list"], setup)
+            if entry is None:
+                continue
+            tasks.append({
+                "task_id": row["task_id"],
+                "text": row["text"],
+                "test_list": list(row["test_list"]),
+                "setup_code": setup,
+                "entry_point": entry,
+                "messages": cc.mbpp_messages(row["text"], row["test_list"][0]),
+            })
+    tasks.sort(key=lambda t: t["task_id"])
+    random.Random(seed).shuffle(tasks)
+    return tasks[:num_problems] if num_problems else tasks
 
 
 # ---------------------------------------------------------------------------
-# Main
+# Pair construction (pure functions, unit-tested)
 # ---------------------------------------------------------------------------
+
+def _norm(text: str) -> str:
+    return "\n".join(line.rstrip() for line in text.strip().splitlines())
+
+
+def build_pairs_for_task(
+    prompt: str,
+    task_id: int | str,
+    candidates: list[dict],
+    max_pairs: int = 2,
+    min_ratio: float = 0.67,
+    max_ratio: float = 1.5,
+) -> tuple[list[dict], dict]:
+    """Turn judged candidates of one task into <= ``max_pairs`` preference pairs.
+
+    Each candidate: ``{"text", "n_tokens", "finished", "status", "temperature"}``.
+    Returns ``(pairs, info)``; ``info`` explains why no pair was produced.
+    """
+    seen: set[str] = set()
+    unique: list[dict] = []
+    for cand in candidates:
+        key = _norm(cand["text"])
+        if key and key not in seen:
+            seen.add(key)
+            unique.append(cand)
+
+    chosen_pool = [c for c in unique if c["status"] == cc.PASS and c["finished"]]
+    reject_pool = [c for c in unique if c["status"] in cc.HARD_NEGATIVE_STATUSES and c["finished"]]
+    info = {"n_pass": len(chosen_pool), "n_hard_negative": len(reject_pool), "reason": None}
+    if not chosen_pool:
+        info["reason"] = "no_passing_candidate"
+        return [], info
+    if not reject_pool:
+        info["reason"] = "no_hard_negative"
+        return [], info
+
+    combos = []
+    for chosen in chosen_pool:
+        for rejected in reject_pool:
+            ratio = max(rejected["n_tokens"], 1) / max(chosen["n_tokens"], 1)
+            if min_ratio <= ratio <= max_ratio:
+                combos.append((abs(math.log(ratio)), ratio, chosen, rejected))
+    if not combos:
+        info["reason"] = "length_ratio_out_of_range"
+        return [], info
+
+    combos.sort(key=lambda item: item[0])  # closest length match first
+    pairs, used_chosen, used_rejected = [], set(), set()
+    for _, ratio, chosen, rejected in combos:
+        if id(chosen) in used_chosen or id(rejected) in used_rejected:
+            continue
+        used_chosen.add(id(chosen))
+        used_rejected.add(id(rejected))
+        pairs.append({
+            "prompt": prompt,
+            "chosen": chosen["text"].strip(),
+            "rejected": rejected["text"].strip(),
+            "source": "mbpp",
+            "task_id": task_id,
+            "chosen_tokens": chosen["n_tokens"],
+            "rejected_tokens": rejected["n_tokens"],
+            "length_ratio": round(ratio, 4),
+            "rejected_status": rejected["status"],
+            "chosen_temperature": chosen["temperature"],
+            "rejected_temperature": rejected["temperature"],
+        })
+        if len(pairs) >= max_pairs:
+            break
+    return pairs, info
+
+
+def split_by_task(pairs: list[dict], val_ratio: float, seed: int) -> tuple[list[dict], list[dict]]:
+    """Split so that no task appears in both train and validation."""
+    task_ids = sorted({p["task_id"] for p in pairs})
+    random.Random(seed).shuffle(task_ids)
+    n_val = max(1, int(len(task_ids) * val_ratio)) if len(task_ids) > 1 else 0
+    val_ids = set(task_ids[:n_val])
+    return ([p for p in pairs if p["task_id"] not in val_ids],
+            [p for p in pairs if p["task_id"] in val_ids])
+
+
+def _quantiles(values: list[float], qs=(0.1, 0.5, 0.9)) -> dict[str, float]:
+    if not values:
+        return {}
+    ordered = sorted(values)
+    return {f"p{int(q * 100)}": round(ordered[min(len(ordered) - 1, int(q * len(ordered)))], 4) for q in qs}
+
+
+def summarize_pairs(pairs: list[dict], task_infos: list[dict], all_status: Counter) -> dict:
+    ratios = [p["length_ratio"] for p in pairs]
+    reasons = Counter(info["reason"] for info in task_infos if info["reason"])
+    return {
+        "tasks": len(task_infos),
+        "tasks_with_pairs": len({p["task_id"] for p in pairs}),
+        "pairs": len(pairs),
+        "skip_reasons": dict(reasons),
+        "candidate_status_counts": dict(all_status),
+        "rejected_status_counts": dict(Counter(p["rejected_status"] for p in pairs)),
+        "length_ratio_quantiles": _quantiles(ratios),
+        "mean_chosen_tokens": sum(p["chosen_tokens"] for p in pairs) / len(pairs) if pairs else 0,
+        "mean_rejected_tokens": sum(p["rejected_tokens"] for p in pairs) / len(pairs) if pairs else 0,
+    }
+
+
+def check_gate(stats: dict, min_pairs: int = 300) -> dict[str, bool]:
+    """Stage-3 gate from the execution plan; all must be True before DPO training."""
+    median = stats.get("length_ratio_quantiles", {}).get("p50")
+    rejected = stats.get("rejected_status_counts", {})
+    total_rejected = sum(rejected.values())
+    return {
+        f"at_least_{min_pairs}_train_pairs": stats.get("train_pairs", stats.get("pairs", 0)) >= min_pairs,
+        "median_length_ratio_in_0.8_1.25": median is not None and 0.8 <= median <= 1.25,
+        "wrong_answer_at_least_half_of_rejected":
+            total_rejected > 0 and rejected.get(cc.WRONG_ANSWER, 0) / total_rejected >= 0.5,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Generation + judging
+# ---------------------------------------------------------------------------
+
+def judge_candidates(tasks: list[dict], per_task_outs: dict, timeout: float, workers: int) -> dict:
+    """Judge ``per_task_outs[task_id] = [(GenOut, temperature), ...]`` in parallel."""
+    jobs = [(task, out, temp) for task in tasks for out, temp in per_task_outs[task["task_id"]]]
+
+    def run(job):
+        task, out, temp = job
+        verdict = cc.judge_mbpp(out.text, task["entry_point"], task["test_list"], task["setup_code"],
+                                hit_token_limit=not out.finished, timeout=timeout)
+        return task["task_id"], {"text": cc.strip_think(out.text), "n_tokens": out.n_tokens,
+                                 "finished": out.finished, "status": verdict.status, "temperature": temp}
+
+    judged: dict = {task["task_id"]: [] for task in tasks}
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for task_id, cand in pool.map(run, jobs):
+            judged[task_id].append(cand)
+    return judged
+
 
 @click.command()
 @click.option("--sft-checkpoint", required=True,
-              help="Path to SFT LoRA adapter or full model checkpoint.")
-@click.option("--num-problems", default=250, show_default=True,
-              help="Number of MBPP problems to sample.")
-@click.option("--n-candidates", default=8, show_default=True,
-              help="Candidates to generate per problem.")
-@click.option("--temperatures", default="0.2,0.5,0.8,1.0,1.2,1.4,1.6,1.8", show_default=True,
-              help="Comma-separated temperatures (one candidate each; truncated to n-candidates).")
-@click.option("--max-new-tokens", default=512, show_default=True)
-@click.option("--timeout", default=10, show_default=True,
-              help="Per-problem test execution timeout in seconds.")
+              help="Model to sample from: 'base', a HF id, a model dir or a LoRA adapter dir.")
+@click.option("--num-problems", default=0, show_default=True, help="0 = the whole pool.")
+@click.option("--n-candidates", default=8, show_default=True)
+@click.option("--temperatures", default="0.2,0.4,0.6,0.8,1.0", show_default=True,
+              help="Cycled over candidates. Must stay within [0.2, 1.0].")
+@click.option("--max-new-tokens", default=1024, show_default=True)
+@click.option("--max-pairs-per-task", default=2, show_default=True)
+@click.option("--min-length-ratio", default=0.67, show_default=True)
+@click.option("--max-length-ratio", default=1.5, show_default=True)
+@click.option("--timeout", default=10.0, show_default=True)
 @click.option("--val-ratio", default=0.1, show_default=True)
+@click.option("--min-pairs", default=300, show_default=True, help="Warn below this many pairs.")
+@click.option("--backend", type=click.Choice(["unsloth", "hf", "vllm"]), default="unsloth", show_default=True)
+@click.option("--batch-size", default=16, show_default=True)
+@click.option("--workers", default=8, show_default=True)
+@click.option("--output-dir", default="data/processed", show_default=True)
 @click.option("--seed", default=42, show_default=True)
-def main(
-    sft_checkpoint: str,
-    num_problems: int,
-    n_candidates: int,
-    temperatures: str,
-    max_new_tokens: int,
-    timeout: int,
-    val_ratio: float,
-    seed: int,
-):
-    random.seed(seed)
-    temps = [float(t) for t in temperatures.split(",")][:n_candidates]
+def main(sft_checkpoint, num_problems, n_candidates, temperatures, max_new_tokens, max_pairs_per_task,
+         min_length_ratio, max_length_ratio, timeout, val_ratio, min_pairs, backend, batch_size,
+         workers, output_dir, seed):
+    temps = [float(t) for t in temperatures.split(",")]
+    if not all(0.2 <= t <= 1.0 for t in temps):
+        raise click.BadParameter("temperatures must lie in [0.2, 1.0]; hotter samples are garbage negatives")
 
-    try:
-        from unsloth import FastLanguageModel
-    except ImportError as e:
-        print(f"ERROR: {e}\nInstall: pip install unsloth[colab-new] -q")
-        sys.exit(1)
+    from model_io import load_generator
 
-    # ---- Load MBPP ----
-    print("Loading MBPP test split …")
-    from datasets import load_dataset
-    mbpp_ds = load_dataset("google-research-datasets/mbpp", "full", split="test", trust_remote_code=True)
-    problems = list(mbpp_ds)
-    random.shuffle(problems)
-    problems = problems[:num_problems]
-    print(f"Sampled {len(problems)} MBPP problems")
+    tasks = load_pool(num_problems, seed)
+    print(f"Pool: {len(tasks)} MBPP tasks (MBPP+ excluded)")
 
-    # ---- Load SFT model ----
-    ckpt_path = Path(sft_checkpoint)
-    base_model = "unsloth/Qwen3.5-4B"
+    generator = load_generator(sft_checkpoint, backend=backend, batch_size=batch_size)
+    tokenizer = generator.tokenizer
+    prompts = [cc.render_prompt(tokenizer, t["messages"]) for t in tasks]
 
-    if ckpt_path.exists() and not (ckpt_path / "config.json").exists():
-        print(f"Loading base model {base_model} + LoRA adapter {ckpt_path} (4-bit) …")
-        from peft import PeftModel
-        model, tokenizer = FastLanguageModel.from_pretrained(
-            model_name=base_model, max_seq_length=1536, load_in_4bit=True,
-        )
-        model = PeftModel.from_pretrained(model, str(ckpt_path))
-    else:
-        print(f"Loading model {sft_checkpoint} (4-bit) …")
-        model, tokenizer = FastLanguageModel.from_pretrained(
-            model_name=sft_checkpoint, max_seq_length=1536, load_in_4bit=True,
-        )
-    FastLanguageModel.for_inference(model)
+    per_task_outs: dict = {t["task_id"]: [] for t in tasks}
+    for k in range(n_candidates):
+        temp = temps[k % len(temps)]
+        print(f"Sampling round {k + 1}/{n_candidates} at T={temp} ...")
+        for task, out in zip(tasks, generator.generate(prompts, max_new_tokens=max_new_tokens,
+                                                       temperature=temp, seed=seed + k)):
+            per_task_outs[task["task_id"]].append((out, temp))
 
-    # ---- Generate pairs ----
-    pairs: list[dict] = []
-    stats = {"total": 0, "valid_pairs": 0, "all_pass": 0, "all_fail": 0, "skipped": 0}
+    print("Executing candidates ...")
+    judged = judge_candidates(tasks, per_task_outs, timeout, workers)
 
-    for prob in tqdm(problems, desc="Generating pairs", unit="problem"):
-        task_id    = str(prob.get("task_id", ""))
-        text       = prob.get("text", "").strip()
-        test_list  = prob.get("test_list", [])
-        setup_code = prob.get("test_setup_code", "") or ""
+    pairs, task_infos, all_status = [], [], Counter()
+    for task, prompt in zip(tasks, prompts):
+        cands = judged[task["task_id"]]
+        all_status.update(c["status"] for c in cands)
+        task_pairs, info = build_pairs_for_task(prompt, task["task_id"], cands, max_pairs_per_task,
+                                                min_length_ratio, max_length_ratio)
+        pairs.extend(task_pairs)
+        task_infos.append(info)
 
-        if not text or not test_list:
-            stats["skipped"] += 1
-            continue
-
-        stats["total"] += 1
-        candidates = _generate_candidates(model, tokenizer, text, temps, max_new_tokens)
-
-        passed, failed = [], []
-        for code in candidates:
-            if _run_tests(code, test_list, setup_code, timeout):
-                passed.append(code)
-            else:
-                failed.append(code)
-
-        if passed and failed:
-            chosen   = random.choice(passed)          # random passing solution (avoid length bias)
-            rejected = random.choice(failed)
-            pairs.append({
-                "prompt": f"Write a Python function to solve the following:\n\n{text}",
-                "chosen": chosen,
-                "rejected": rejected,
-                "source": "mbpp",
-                "task_id": task_id,
-            })
-            stats["valid_pairs"] += 1
-        elif passed:
-            stats["all_pass"] += 1
-        else:
-            stats["all_fail"] += 1
-
-    # ---- Save ----
-    random.shuffle(pairs)
-    val_n       = max(1, int(len(pairs) * val_ratio))
-    val_pairs   = pairs[:val_n]
-    train_pairs = pairs[val_n:]
-
-    out_dir = ROOT / "data/processed"
+    train, val = split_by_task(pairs, val_ratio, seed)
+    out_dir = ROOT / output_dir
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "dpo_pairs.jsonl").write_text(
-        "\n".join(json.dumps(p, ensure_ascii=False) for p in train_pairs) + "\n",
-        encoding="utf-8",
-    )
-    (out_dir / "dpo_pairs_val.jsonl").write_text(
-        "\n".join(json.dumps(p, ensure_ascii=False) for p in val_pairs) + "\n",
-        encoding="utf-8",
-    )
+    for name, rows in (("dpo_pairs.jsonl", train), ("dpo_pairs_val.jsonl", val)):
+        (out_dir / name).write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows),
+                                    encoding="utf-8")
+    stats = summarize_pairs(pairs, task_infos, all_status)
+    stats.update({"train_pairs": len(train), "val_pairs": len(val), "sampled_from": sft_checkpoint,
+                  "temperatures": temps, "n_candidates": n_candidates})
+    (out_dir / "dpo_pairs_stats.json").write_text(json.dumps(stats, indent=2), encoding="utf-8")
 
-    print(f"\n{'='*50}")
-    print(f"Problems processed : {stats['total']}")
-    print(f"Valid pairs        : {stats['valid_pairs']}  ({stats['valid_pairs']/max(stats['total'],1):.0%} yield)")
-    print(f"All passed         : {stats['all_pass']}")
-    print(f"All failed         : {stats['all_fail']}")
-    print(f"Skipped            : {stats['skipped']}")
-    print(f"Train pairs        : {len(train_pairs)}")
-    print(f"Val pairs          : {len(val_pairs)}")
-    print(f"Saved to           : {out_dir}/dpo_pairs.jsonl")
-    print(f"{'='*50}\n")
-
-    if len(train_pairs) < 200:
-        print("WARNING: fewer than 200 train pairs. Consider --num-problems 350 or lowering --n-candidates threshold.")
+    print(json.dumps(stats, indent=2))
+    gate = check_gate(stats, min_pairs)
+    print("Stage-3 gate:", json.dumps(gate))
+    if not all(gate.values()):
+        print("WARNING: preference-pair gate NOT met; do not start DPO training "
+              "(try --n-candidates 12 or inspect dpo_pairs_stats.json).")
 
 
 if __name__ == "__main__":

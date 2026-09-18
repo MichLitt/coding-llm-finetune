@@ -1,31 +1,26 @@
-# Ablation experiment matrix for v3
-# Usage: python scripts/sft_train.py --exp-id <key>
+# SFT experiment matrix for CodeTune v3.1.
+# The matrix owns lora_r / lora_alpha / learning_rate / num_train_epochs; the Colab
+# profile (sft_config_colab_a100.yaml) only supplies batch size, precision and I/O.
+# Usage: python scripts/sft_train.py --config-path configs/sft_config_colab_a100.yaml --exp-id <key>
+#
+# Targeted (Coder-Agent failure pattern) data was removed in v3.1: it leaked HumanEval
+# solutions and targeted the wrong model. See report/CodeTune_v3.1_Execution_Plan.md.
 
 experiments:
-  # Core experiment: generic data only (ablation baseline)
-  sft_generic:
-    description: "Generic only: Magicoder + EvolCodeAlpaca"
+  # Original v3 recipe: high LR, 3 epochs. Aggressive for an already post-trained model.
+  sft_generic_aggr:
+    description: "Generic SFT, aggressive: r32 / alpha64 / lr 2e-4 / 3 epochs"
     data_sources: [magicoder, evol]
     lora_r: 32
+    lora_alpha: 64
+    learning_rate: 2.0e-4
     num_train_epochs: 3
 
-  # Primary experiment: generic + targeted failure patterns
-  sft_targeted:
-    description: "Generic + Targeted (primary): adds Coder-Agent failure patterns"
-    data_sources: [magicoder, evol, targeted]
-    lora_r: 32
-    num_train_epochs: 3
-
-  # Ablation: lower LoRA rank
-  sft_targeted_r16:
-    description: "Rank ablation: r=16 vs r=32"
-    data_sources: [magicoder, evol, targeted]
+  # Conservative control: lower LR, single epoch, smaller adapter.
+  sft_generic_cons:
+    description: "Generic SFT, conservative: r16 / alpha32 / lr 5e-5 / 1 epoch"
+    data_sources: [magicoder, evol]
     lora_r: 16
-    num_train_epochs: 3
-
-  # Ablation: fewer epochs (check overfitting on small dataset)
-  sft_targeted_ep2:
-    description: "Epoch ablation: 2 epochs vs 3"
-    data_sources: [magicoder, evol, targeted]
-    lora_r: 32
-    num_train_epochs: 2
+    lora_alpha: 32
+    learning_rate: 5.0e-5
+    num_train_epochs: 1

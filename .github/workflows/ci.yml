@@ -26,7 +26,7 @@ jobs:
           python-version: "3.12"
 
       - name: Sync locked dependencies
-        run: uv sync --frozen
+        run: uv sync --frozen --extra dev
 
       - name: Verify lockfile consistency
         run: uv lock --check
@@ -38,3 +38,33 @@ jobs:
           uv run python scripts/sft_train.py --help
           uv run python scripts/generate_dpo_pairs.py --help
           uv run python scripts/dpo_train.py --help
+          uv run python scripts/run_eval.py --help
+          uv run python scripts/compare_runs.py --help
+
+      - name: Offline unit tests
+        run: uv run pytest -q
+
+  evalplus-linux:
+    # Advisory: exercises the real evalplus (HumanEval+/MBPP+) path that cannot run on macOS.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Sync dependencies (with evalplus)
+        run: uv sync --frozen --extra dev --extra eval
+
+      - name: evalplus integration test
+        env:
+          RUN_EVALPLUS_INTEGRATION: "1"
+        run: uv run pytest tests/test_evalplus_integration.py -q

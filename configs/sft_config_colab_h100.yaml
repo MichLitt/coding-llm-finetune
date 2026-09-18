@@ -1,16 +1,19 @@
 # SFT training profile for Colab Pro H100.
+# Identical to the A100 reference profile for v3.1 so results are comparable. LoRA r/alpha,
+# learning rate, epochs and data sources are owned by configs/ablation_matrix.yaml;
+# the values under `lora:`/`learning_rate` below are only fallbacks.
 # Usage:
-#   python scripts/sft_train.py --config-path configs/sft_config_colab_h100.yaml --exp-id sft_targeted
+#   python scripts/sft_train.py --config-path configs/sft_config_colab_h100.yaml --exp-id sft_generic_aggr
 
 model:
   name: "unsloth/Qwen3.5-4B"
-  max_seq_length: 1024
+  max_seq_length: 1024            # 数据已过滤至 ≤1024 token，无需更长
   load_in_4bit: false
   dtype: "bfloat16"
 
 lora:
-  r: 32
-  lora_alpha: 64
+  r: 32                           # fallback only; the ablation matrix sets r and alpha
+  lora_alpha: 64                  # keep alpha = 2 * r
   lora_dropout: 0.0
   bias: "none"
   target_modules:
@@ -25,8 +28,8 @@ lora:
   random_state: 42
 
 training:
-  per_device_train_batch_size: 16
-  gradient_accumulation_steps: 1
+  per_device_train_batch_size: 32  # 从 16 升至 32，预计用 ~45 GB VRAM
+  gradient_accumulation_steps: 2   # effective batch: 64，梯度估计更稳定
   num_train_epochs: 3
   learning_rate: 2.0e-4
   lr_scheduler_type: "cosine"
@@ -43,8 +46,8 @@ training:
 checkpointing:
   output_dir: "results/sft_checkpoints"
   logging_steps: 10
-  eval_steps: 250
-  save_steps: 500
+  eval_steps: 25                  # the whole run is only ~60-170 steps; a checkpoint every 25
+  save_steps: 25                  # steps keeps a Colab disconnect cheap (resume with --resume-from auto)
   save_total_limit: 3
   load_best_model_at_end: true
   metric_for_best_model: "eval_loss"
